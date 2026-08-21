@@ -2,6 +2,7 @@ mod agent;
 mod agent_tools;
 mod chat_events;
 mod chat_history;
+mod claude_cli;
 mod commands;
 mod db;
 mod debug;
