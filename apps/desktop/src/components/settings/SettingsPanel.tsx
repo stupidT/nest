@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
   AppSettings,
+  GeneralSettingsUpdate,
   HubConnectionStatus,
   VaultChangeMode,
   VaultChangePreview,
@@ -88,8 +89,24 @@ function withCompatibleLlmDefaults(settings: AppSettings): AppSettings {
 
 /** Persist payload omits transient resolved path differences for dirty checks. */
 function persistKey(settings: AppSettings): string {
-  const { resolved_knowledge_dir: _, ...rest } = settings;
+  const {
+    resolved_knowledge_dir: _resolved,
+    claude_agent_enabled: _claudeEnabled,
+    claude_cli_path: _claudePath,
+    claude_custom_models: _claudeModels,
+    ...rest
+  } = settings;
   return JSON.stringify(rest);
+}
+
+function generalPayload(settings: AppSettings): GeneralSettingsUpdate {
+  const {
+    claude_agent_enabled: _claudeEnabled,
+    claude_cli_path: _claudePath,
+    claude_custom_models: _claudeModels,
+    ...general
+  } = settings;
+  return general;
 }
 
 function describeHubStatus(status: HubConnectionStatus): string {
@@ -208,7 +225,7 @@ export function SettingsPanel() {
     const timer = window.setTimeout(() => {
       void (async () => {
         try {
-          await api.settingsSet(form);
+          await api.settingsSet(generalPayload(form));
           const refreshed = await api.settingsGet();
           lastSavedKey.current = persistKey(refreshed);
           setForm((prev) => ({

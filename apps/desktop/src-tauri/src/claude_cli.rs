@@ -1,6 +1,4 @@
-#![allow(dead_code)]
-
-use crate::error::{AppError, AppResult};
+use crate::error::AppError;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,9 +20,38 @@ impl ClaudeErrorCode {
             ClaudeErrorCode::ProcessFailed => "claude_process_failed",
         }
     }
+}
 
-    pub fn into_error(self, detail: impl std::fmt::Display) -> AppError {
-        AppError::msg(format!("{}: {}", self.as_str(), detail))
+impl std::fmt::Display for ClaudeErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("{code}: {detail}")]
+pub struct ClaudeError {
+    code: ClaudeErrorCode,
+    detail: String,
+}
+
+#[allow(dead_code)]
+impl ClaudeError {
+    pub fn new(code: ClaudeErrorCode, detail: impl Into<String>) -> Self {
+        Self {
+            code,
+            detail: detail.into(),
+        }
+    }
+
+    pub fn code(&self) -> ClaudeErrorCode {
+        self.code
+    }
+}
+
+impl From<ClaudeError> for AppError {
+    fn from(value: ClaudeError) -> Self {
+        AppError::Message(value.to_string())
     }
 }
 
@@ -40,19 +67,27 @@ pub enum ClaudeLaunchTarget {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ClaudeDetection {
     pub configured_path: String,
     pub resolved_path: String,
     pub launch_target: ClaudeLaunchTarget,
 }
 
-pub fn detect_cli(configured_path: Option<&Path>) -> AppResult<Vec<ClaudeDetection>> {
+#[allow(dead_code)]
+pub fn detect_cli(configured_path: Option<&Path>) -> Result<Vec<ClaudeDetection>, ClaudeError> {
     match configured_path {
         Some(path) if !path.as_os_str().is_empty() => {
             let home = std::env::var("USERPROFILE")
                 .map(PathBuf::from)
                 .unwrap_or_default();
-            let normalized = normalize_configured(&std::env::current_dir()?, &home, path);
+            let cwd = std::env::current_dir().map_err(|error| {
+                ClaudeError::new(
+                    ClaudeErrorCode::ProcessFailed,
+                    format!("failed to read current directory: {error}"),
+                )
+            })?;
+            let normalized = normalize_configured(&cwd, &home, path);
             let path_env = std::env::var("PATH").unwrap_or_default();
             let candidates = resolve_entry(&normalized, &path_env)?;
             Ok(candidates
@@ -68,7 +103,7 @@ pub fn detect_cli(configured_path: Option<&Path>) -> AppResult<Vec<ClaudeDetecti
     }
 }
 
-fn detect_auto() -> AppResult<Vec<ClaudeDetection>> {
+fn detect_auto() -> Result<Vec<ClaudeDetection>, ClaudeError> {
     let path_env = std::env::var("PATH").unwrap_or_default();
     let search_dirs = collect_search_dirs(&path_env);
     let candidates = find_auto_candidates(&search_dirs, &default_npm_global_dirs(), &path_env);
@@ -77,10 +112,12 @@ fn detect_auto() -> AppResult<Vec<ClaudeDetection>> {
 
 fn detections_from_candidates(
     candidates: Vec<(PathBuf, ClaudeLaunchTarget)>,
-) -> AppResult<Vec<ClaudeDetection>> {
+) -> Result<Vec<ClaudeDetection>, ClaudeError> {
     if candidates.is_empty() {
-        return Err(ClaudeErrorCode::InvalidCliPath
-            .into_error("no Claude CLI found on PATH or in known npm locations"));
+        return Err(ClaudeError::new(
+            ClaudeErrorCode::InvalidCliPath,
+            "no Claude CLI found on PATH or in known npm locations",
+        ));
     }
     Ok(candidates
         .into_iter()
@@ -121,7 +158,7 @@ pub(crate) fn normalize_configured(base: &Path, home: &Path, path: &Path) -> Pat
 pub(crate) fn resolve_entry(
     path: &Path,
     path_env: &str,
-) -> AppResult<Vec<(PathBuf, ClaudeLaunchTarget)>> {
+) -> Result<Vec<(PathBuf, ClaudeLaunchTarget)>, ClaudeError> {
     if path.is_dir() {
         let mut candidates = Vec::new();
         let exe = path.join("claude.exe");
@@ -316,12 +353,12 @@ pub(crate) fn find_auto_candidates(
     candidates
 }
 
-fn build_node_target(wrapper: &Path, path_env: &str) -> AppResult<ClaudeLaunchTarget> {
+fn build_node_target(wrapper: &Path, path_env: &str) -> Result<ClaudeLaunchTarget, ClaudeError> {
     let node = find_node_executable(&node_hints(wrapper), path_env).ok_or_else(|| {
-        ClaudeErrorCode::NodeNotFound.into_error(format!(
-            "node.exe is required to launch {}",
-            wrapper.display()
-        ))
+        ClaudeError::new(
+            ClaudeErrorCode::NodeNotFound,
+            format!("node.exe is required to launch {}", wrapper.display()),
+        )
     })?;
     Ok(ClaudeLaunchTarget::NodeScript {
         node_executable: node,
@@ -329,8 +366,8 @@ fn build_node_target(wrapper: &Path, path_env: &str) -> AppResult<ClaudeLaunchTa
     })
 }
 
-fn invalid_path(path: &Path) -> AppError {
-    ClaudeErrorCode::InvalidCliPath.into_error(path.display().to_string())
+fn invalid_path(path: &Path) -> ClaudeError {
+    ClaudeError::new(ClaudeErrorCode::InvalidCliPath, path.display().to_string())
 }
 
 fn wrapper_relative() -> PathBuf {
@@ -362,7 +399,9 @@ pub enum TurnOutcome {
     },
     Failed {
         code: ClaudeErrorCode,
-        message: String,
+        subtype: Option<String>,
+        sanitized_result: Option<String>,
+        exit_ok: bool,
     },
 }
 
@@ -376,7 +415,6 @@ struct ParserState {
     saw_valid_init: bool,
     model: Option<String>,
     cli_version: Option<String>,
-    cli_session_id: Option<String>,
     streamed_text: String,
     streamed_thinking: String,
     assistant_text: Option<String>,
@@ -393,7 +431,15 @@ struct ParsedResultMessage {
 }
 
 fn preview(text: &str) -> String {
-    let mut shown: String = text.chars().take(80).collect();
+    truncate_chars(text, 80)
+}
+
+fn sanitize_result_text(text: &str) -> String {
+    truncate_chars(text, 500)
+}
+
+fn truncate_chars(text: &str, limit: usize) -> String {
+    let mut shown: String = text.chars().take(limit).collect();
     if shown.len() < text.len() {
         shown.push('…');
     }
@@ -416,10 +462,22 @@ fn pick_final(streamed: &str, candidates: &[Option<&String>]) -> String {
             best = Some(candidate);
         }
     }
-    best.map(String::from)
-        .unwrap_or_else(|| streamed.to_string())
+    if let Some(best) = best {
+        return best.clone();
+    }
+    for candidate in candidates.iter().flatten() {
+        if !candidate.is_empty() {
+            crate::nest_debug!(
+                "claude_cli",
+                "streamed text conflicts with the final candidate; using the final candidate"
+            );
+            return (*candidate).clone();
+        }
+    }
+    streamed.to_string()
 }
 
+#[allow(dead_code)]
 impl StreamParser {
     pub fn new(expected_session_id: &str) -> Self {
         Self {
@@ -428,14 +486,16 @@ impl StreamParser {
         }
     }
 
-    pub fn ingest_line(&mut self, line: &str) -> AppResult<Option<ParserEvent>> {
+    pub fn ingest_line(&mut self, line: &str) -> Result<Option<ParserEvent>, ClaudeError> {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             return Ok(None);
         }
         let value: serde_json::Value = serde_json::from_str(trimmed).map_err(|_| {
-            ClaudeErrorCode::Protocol
-                .into_error(format!("non-JSON output line: {}", preview(trimmed)))
+            ClaudeError::new(
+                ClaudeErrorCode::Protocol,
+                format!("non-JSON output line: {}", preview(trimmed)),
+            )
         })?;
         let kind = value
             .get("type")
@@ -456,7 +516,10 @@ impl StreamParser {
         }
     }
 
-    fn handle_system(&mut self, value: &serde_json::Value) -> AppResult<Option<ParserEvent>> {
+    fn handle_system(
+        &mut self,
+        value: &serde_json::Value,
+    ) -> Result<Option<ParserEvent>, ClaudeError> {
         if value.get("subtype").and_then(|value| value.as_str()) != Some("init") {
             return Ok(None);
         }
@@ -466,10 +529,13 @@ impl StreamParser {
             .unwrap_or_default()
             .to_string();
         if session_id != self.expected_session_id {
-            return Err(ClaudeErrorCode::SessionMismatch.into_error(format!(
-                "init session {session_id} does not match {}",
-                self.expected_session_id
-            )));
+            return Err(ClaudeError::new(
+                ClaudeErrorCode::SessionMismatch,
+                format!(
+                    "init session {session_id} does not match {}",
+                    self.expected_session_id
+                ),
+            ));
         }
         let model = value
             .get("model")
@@ -480,7 +546,6 @@ impl StreamParser {
             .and_then(|value| value.as_str())
             .map(str::to_string);
         self.state.saw_valid_init = true;
-        self.state.cli_session_id = Some(session_id.clone());
         self.state.model = model.clone();
         self.state.cli_version = cli_version.clone();
         Ok(Some(ParserEvent::Initialized {
@@ -490,7 +555,10 @@ impl StreamParser {
         }))
     }
 
-    fn handle_stream_event(&mut self, value: &serde_json::Value) -> AppResult<Option<ParserEvent>> {
+    fn handle_stream_event(
+        &mut self,
+        value: &serde_json::Value,
+    ) -> Result<Option<ParserEvent>, ClaudeError> {
         let Some(event) = value.get("event") else {
             return Ok(None);
         };
@@ -560,17 +628,26 @@ impl StreamParser {
         }
     }
 
-    fn handle_result(&mut self, value: &serde_json::Value) -> AppResult<()> {
+    fn handle_result(&mut self, value: &serde_json::Value) -> Result<(), ClaudeError> {
         let session_id = value
             .get("session_id")
             .and_then(|value| value.as_str())
             .unwrap_or_default()
             .to_string();
-        if !session_id.is_empty() && session_id != self.expected_session_id {
-            return Err(ClaudeErrorCode::SessionMismatch.into_error(format!(
-                "result session {session_id} does not match {}",
-                self.expected_session_id
-            )));
+        if session_id.is_empty() {
+            return Err(ClaudeError::new(
+                ClaudeErrorCode::Protocol,
+                "result message without session_id",
+            ));
+        }
+        if session_id != self.expected_session_id {
+            return Err(ClaudeError::new(
+                ClaudeErrorCode::SessionMismatch,
+                format!(
+                    "result session {session_id} does not match {}",
+                    self.expected_session_id
+                ),
+            ));
         }
         self.state.result = Some(ParsedResultMessage {
             subtype: value
@@ -591,31 +668,42 @@ impl StreamParser {
         Ok(())
     }
 
-    pub fn finish(&mut self, exit_ok: bool) -> AppResult<TurnOutcome> {
+    pub fn finish(&mut self, exit_ok: bool) -> Result<TurnOutcome, ClaudeError> {
         let Some(result) = self.state.result.clone() else {
-            return Err(ClaudeErrorCode::Protocol.into_error(format!(
-                "CLI exited without a result message (exit_ok={exit_ok})"
-            )));
-        };
-        if !exit_ok {
+            if exit_ok {
+                return Err(ClaudeError::new(
+                    ClaudeErrorCode::Protocol,
+                    "CLI exited without a result message",
+                ));
+            }
             return Ok(TurnOutcome::Failed {
                 code: ClaudeErrorCode::ProcessFailed,
-                message: format!(
-                    "CLI exited unsuccessfully after result subtype {}",
-                    result.subtype
-                ),
+                subtype: None,
+                sanitized_result: None,
+                exit_ok,
             });
-        }
-        if !self.state.saw_valid_init {
-            return Err(
-                ClaudeErrorCode::Protocol.into_error("result without a matching system/init")
-            );
-        }
+        };
         if result.is_error || result.subtype != "success" {
             return Ok(TurnOutcome::Failed {
                 code: ClaudeErrorCode::Protocol,
-                message: format!("result subtype: {}", result.subtype),
+                subtype: Some(result.subtype),
+                sanitized_result: result.text.as_deref().map(sanitize_result_text),
+                exit_ok,
             });
+        }
+        if !exit_ok {
+            return Ok(TurnOutcome::Failed {
+                code: ClaudeErrorCode::ProcessFailed,
+                subtype: Some(result.subtype),
+                sanitized_result: result.text.as_deref().map(sanitize_result_text),
+                exit_ok,
+            });
+        }
+        if !self.state.saw_valid_init {
+            return Err(ClaudeError::new(
+                ClaudeErrorCode::Protocol,
+                "result without a matching system/init",
+            ));
         }
         let answer = pick_final(
             &self.state.streamed_text,
@@ -825,14 +913,14 @@ mod resolver_tests {
         let dir = fx.root.join("dir");
         std::fs::create_dir_all(&dir).unwrap();
         let err = detect_cli(Some(&dir)).unwrap_err();
-        assert_eq!(err_code(&err), ClaudeErrorCode::InvalidCliPath);
+        assert_eq!(err.code(), ClaudeErrorCode::InvalidCliPath);
     }
 
     #[test]
     fn missing_file_is_invalid() {
         let fx = Fixture::new("missing");
         let err = detect_cli(Some(&fx.file("nope/claude.exe"))).unwrap_err();
-        assert_eq!(err_code(&err), ClaudeErrorCode::InvalidCliPath);
+        assert_eq!(err.code(), ClaudeErrorCode::InvalidCliPath);
     }
 
     #[test]
@@ -840,7 +928,7 @@ mod resolver_tests {
         let fx = Fixture::new("unsupported");
         let txt = fx.touch("claude.txt");
         let err = detect_cli(Some(&txt)).unwrap_err();
-        assert_eq!(err_code(&err), ClaudeErrorCode::InvalidCliPath);
+        assert_eq!(err.code(), ClaudeErrorCode::InvalidCliPath);
     }
 
     #[test]
@@ -848,7 +936,7 @@ mod resolver_tests {
         let fx = Fixture::new("evil-exe");
         let exe = fx.touch("tools/evil.exe");
         let err = detect_cli(Some(&exe)).unwrap_err();
-        assert_eq!(err_code(&err), ClaudeErrorCode::InvalidCliPath);
+        assert_eq!(err.code(), ClaudeErrorCode::InvalidCliPath);
     }
 
     #[test]
@@ -856,7 +944,7 @@ mod resolver_tests {
         let fx = Fixture::new("evil-cjs");
         let script = fx.touch("tools/other.cjs");
         let err = detect_cli(Some(&script)).unwrap_err();
-        assert_eq!(err_code(&err), ClaudeErrorCode::InvalidCliPath);
+        assert_eq!(err.code(), ClaudeErrorCode::InvalidCliPath);
     }
 
     #[test]
@@ -864,7 +952,7 @@ mod resolver_tests {
         let fx = Fixture::new("evil-cmd");
         let shim = fx.touch("tools/not-claude.cmd");
         let err = detect_cli(Some(&shim)).unwrap_err();
-        assert_eq!(err_code(&err), ClaudeErrorCode::InvalidCliPath);
+        assert_eq!(err.code(), ClaudeErrorCode::InvalidCliPath);
     }
 
     #[test]
@@ -872,7 +960,7 @@ mod resolver_tests {
         let fx = Fixture::new("no-node");
         let wrapper = fx.touch("npm/node_modules/@anthropic-ai/claude-code/cli-wrapper.cjs");
         let err = resolve_entry(&wrapper, "").unwrap_err();
-        assert_eq!(err_code(&err), ClaudeErrorCode::NodeNotFound);
+        assert_eq!(err.code(), ClaudeErrorCode::NodeNotFound);
         fx.touch("npm/node.exe");
         let candidates = resolve_entry(&wrapper, "").unwrap();
         assert!(matches!(
@@ -998,21 +1086,7 @@ mod resolver_tests {
     #[test]
     fn auto_detection_failure_is_invalid_path() {
         let err = detections_from_candidates(Vec::new()).unwrap_err();
-        assert_eq!(err_code(&err), ClaudeErrorCode::InvalidCliPath);
-    }
-
-    fn err_code(error: &AppError) -> ClaudeErrorCode {
-        let text = error.to_string();
-        [
-            ClaudeErrorCode::InvalidCliPath,
-            ClaudeErrorCode::NodeNotFound,
-            ClaudeErrorCode::Protocol,
-            ClaudeErrorCode::SessionMismatch,
-            ClaudeErrorCode::ProcessFailed,
-        ]
-        .into_iter()
-        .find(|code| text.starts_with(code.as_str()))
-        .expect("error should carry a ClaudeErrorCode prefix")
+        assert_eq!(err.code(), ClaudeErrorCode::InvalidCliPath);
     }
 }
 
@@ -1075,7 +1149,7 @@ mod parser_tests {
             })
         );
         let err = parser.finish(true).unwrap_err();
-        assert!(err.to_string().contains(ClaudeErrorCode::Protocol.as_str()));
+        assert_eq!(err.code(), ClaudeErrorCode::Protocol);
     }
 
     #[test]
@@ -1083,9 +1157,7 @@ mod parser_tests {
         let mut parser = StreamParser::new(SESSION);
         let foreign = r#"{"type":"system","subtype":"init","session_id":"88888888-8888-4888-8888-888888888888","model":"m"}"#;
         let err = parser.ingest_line(foreign).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains(ClaudeErrorCode::SessionMismatch.as_str()));
+        assert_eq!(err.code(), ClaudeErrorCode::SessionMismatch);
     }
 
     #[test]
@@ -1157,18 +1229,70 @@ mod parser_tests {
     }
 
     #[test]
-    fn result_error_subtype_fails_the_turn() {
+    fn result_error_subtype_fails_with_structured_info() {
         let mut parser = StreamParser::new(SESSION);
         feed_init(&mut parser);
         let error_result = format!(
             r#"{{"type":"result","subtype":"error_during_execution","session_id":"{SESSION}","is_error":true,"result":"boom"}}"#
         );
         parser.ingest_line(&error_result).unwrap();
-        let TurnOutcome::Failed { code, message } = parser.finish(true).unwrap() else {
+        let TurnOutcome::Failed {
+            code,
+            subtype,
+            sanitized_result,
+            exit_ok,
+        } = parser.finish(true).unwrap()
+        else {
             panic!("expected failure");
         };
         assert_eq!(code, ClaudeErrorCode::Protocol);
-        assert!(message.contains("error_during_execution"));
+        assert_eq!(subtype.as_deref(), Some("error_during_execution"));
+        assert_eq!(sanitized_result.as_deref(), Some("boom"));
+        assert!(exit_ok);
+    }
+
+    #[test]
+    fn error_result_survives_non_zero_exit() {
+        let mut parser = StreamParser::new(SESSION);
+        feed_init(&mut parser);
+        let error_result = format!(
+            r#"{{"type":"result","subtype":"error_during_execution","session_id":"{SESSION}","is_error":true,"result":"auth expired"}}"#
+        );
+        parser.ingest_line(&error_result).unwrap();
+        let TurnOutcome::Failed {
+            code,
+            subtype,
+            sanitized_result,
+            exit_ok,
+        } = parser.finish(false).unwrap()
+        else {
+            panic!("expected failure");
+        };
+        assert_eq!(code, ClaudeErrorCode::Protocol);
+        assert_eq!(subtype.as_deref(), Some("error_during_execution"));
+        assert_eq!(sanitized_result.as_deref(), Some("auth expired"));
+        assert!(!exit_ok);
+    }
+
+    #[test]
+    fn sanitized_result_truncates_long_error_text() {
+        let mut parser = StreamParser::new(SESSION);
+        feed_init(&mut parser);
+        let long_text = "x".repeat(600);
+        let error_result = format!(
+            r#"{{"type":"result","subtype":"error_max_turns","session_id":"{SESSION}","is_error":true,"result":"{}"}}"#,
+            long_text
+        );
+        parser.ingest_line(&error_result).unwrap();
+        let TurnOutcome::Failed {
+            sanitized_result, ..
+        } = parser.finish(true).unwrap()
+        else {
+            panic!("expected failure");
+        };
+        let sanitized = sanitized_result.unwrap();
+        assert_eq!(sanitized.chars().count(), 501);
+        assert!(sanitized.ends_with('…'));
     }
 
     #[test]
@@ -1176,7 +1300,7 @@ mod parser_tests {
         let mut parser = StreamParser::new(SESSION);
         parser.ingest_line(&result_line("success", "hi")).unwrap();
         let err = parser.finish(true).unwrap_err();
-        assert!(err.to_string().contains(ClaudeErrorCode::Protocol.as_str()));
+        assert_eq!(err.code(), ClaudeErrorCode::Protocol);
     }
 
     #[test]
@@ -1185,10 +1309,38 @@ mod parser_tests {
         feed_init(&mut parser);
         parser.ingest_line(&text_delta("hi")).unwrap();
         parser.ingest_line(&result_line("success", "hi")).unwrap();
-        let TurnOutcome::Failed { code, .. } = parser.finish(false).unwrap() else {
+        let TurnOutcome::Failed {
+            code,
+            subtype,
+            exit_ok,
+            ..
+        } = parser.finish(false).unwrap()
+        else {
             panic!("expected failure");
         };
         assert_eq!(code, ClaudeErrorCode::ProcessFailed);
+        assert_eq!(subtype.as_deref(), Some("success"));
+        assert!(!exit_ok);
+    }
+
+    #[test]
+    fn non_zero_exit_without_result_is_process_failure() {
+        let mut parser = StreamParser::new(SESSION);
+        feed_init(&mut parser);
+        parser.ingest_line(&text_delta("partial")).unwrap();
+        let TurnOutcome::Failed {
+            code,
+            subtype,
+            sanitized_result,
+            exit_ok,
+        } = parser.finish(false).unwrap()
+        else {
+            panic!("expected failure");
+        };
+        assert_eq!(code, ClaudeErrorCode::ProcessFailed);
+        assert_eq!(subtype, None);
+        assert_eq!(sanitized_result, None);
+        assert!(!exit_ok);
     }
 
     #[test]
@@ -1234,7 +1386,7 @@ mod parser_tests {
     fn non_json_line_is_a_protocol_error() {
         let mut parser = StreamParser::new(SESSION);
         let err = parser.ingest_line("this is not json").unwrap_err();
-        assert!(err.to_string().contains(ClaudeErrorCode::Protocol.as_str()));
+        assert_eq!(err.code(), ClaudeErrorCode::Protocol);
         assert!(err.to_string().contains("this is not"));
     }
 
@@ -1244,15 +1396,16 @@ mod parser_tests {
         feed_init(&mut parser);
         parser.ingest_line(&text_delta("partial")).unwrap();
         let err = parser.finish(true).unwrap_err();
-        assert!(err.to_string().contains(ClaudeErrorCode::Protocol.as_str()));
+        assert_eq!(err.code(), ClaudeErrorCode::Protocol);
     }
 
     #[test]
-    fn non_zero_exit_without_result_reports_missing_result() {
+    fn result_without_session_id_is_a_protocol_error() {
         let mut parser = StreamParser::new(SESSION);
         feed_init(&mut parser);
-        let err = parser.finish(false).unwrap_err();
-        assert!(err.to_string().contains(ClaudeErrorCode::Protocol.as_str()));
+        let orphan = r#"{"type":"result","subtype":"success","result":"hi"}"#;
+        let err = parser.ingest_line(orphan).unwrap_err();
+        assert_eq!(err.code(), ClaudeErrorCode::Protocol);
     }
 
     #[test]
@@ -1262,9 +1415,7 @@ mod parser_tests {
         let foreign =
             result_line("success", "hi").replace(SESSION, "88888888-8888-4888-8888-888888888888");
         let err = parser.ingest_line(&foreign).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains(ClaudeErrorCode::SessionMismatch.as_str()));
+        assert_eq!(err.code(), ClaudeErrorCode::SessionMismatch);
     }
 
     #[test]
@@ -1292,7 +1443,7 @@ mod parser_tests {
     }
 
     #[test]
-    fn streamed_text_wins_when_candidates_conflict() {
+    fn result_text_wins_when_streamed_conflicts() {
         let mut parser = StreamParser::new(SESSION);
         feed_init(&mut parser);
         parser.ingest_line(&text_delta("streamed")).unwrap();
@@ -1303,7 +1454,7 @@ mod parser_tests {
         let TurnOutcome::Success { answer, .. } = parser.finish(true).unwrap() else {
             panic!("expected success");
         };
-        assert_eq!(answer, "streamed");
+        assert_eq!(answer, "different");
     }
 
     #[test]

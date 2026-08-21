@@ -420,6 +420,11 @@ export type AppSettings = {
   claude_custom_models: string;
 };
 
+export type GeneralSettingsUpdate = Omit<
+  AppSettings,
+  "claude_agent_enabled" | "claude_cli_path" | "claude_custom_models"
+>;
+
 export type Citation = {
   chunk_id: string;
   file_path: string;

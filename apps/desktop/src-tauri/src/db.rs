@@ -78,21 +78,11 @@ impl AppSettings {
     /// an OpenRouter key is pasted while Nest's untouched OpenAI defaults are
     /// still selected. Explicit custom endpoints and models are preserved.
     pub fn normalize_llm_configuration(&mut self) {
-        self.llm_base_url = self.llm_base_url.trim().trim_end_matches('/').to_string();
-        self.llm_api_key = self.llm_api_key.trim().to_string();
-        self.chat_model = self.chat_model.trim().to_string();
-
-        let openrouter_key = self.llm_api_key.starts_with("sk-or-v1-");
-        let default_openai_endpoint =
-            self.llm_base_url.is_empty() || self.llm_base_url == LEGACY_OPENAI_BASE_URL;
-        if openrouter_key && default_openai_endpoint {
-            self.llm_base_url = OPENROUTER_BASE_URL.into();
-        }
-        if (openrouter_key || self.llm_base_url == OPENROUTER_BASE_URL)
-            && self.chat_model == LEGACY_OPENAI_CHAT_MODEL
-        {
-            self.chat_model = OPENROUTER_DEFAULT_CHAT_MODEL.into();
-        }
+        normalize_llm_configuration_fields(
+            &mut self.llm_base_url,
+            &mut self.llm_api_key,
+            &mut self.chat_model,
+        );
     }
 
     /// Proxy URL used for outbound requests when enabled; otherwise empty (direct).
@@ -102,6 +92,72 @@ impl AppSettings {
         } else {
             ""
         }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GeneralSettingsUpdate {
+    pub llm_base_url: String,
+    pub llm_api_key: String,
+    pub chat_model: String,
+    pub hub_base_url: String,
+    #[serde(default)]
+    pub proxy_url: String,
+    #[serde(default)]
+    pub proxy_enabled: bool,
+    #[serde(default = "default_font_size_pt")]
+    pub font_size_pt: u32,
+    #[serde(default = "default_display_language")]
+    pub display_language: String,
+    #[serde(default)]
+    pub knowledge_dir: String,
+}
+
+impl From<&AppSettings> for GeneralSettingsUpdate {
+    fn from(settings: &AppSettings) -> Self {
+        Self {
+            llm_base_url: settings.llm_base_url.clone(),
+            llm_api_key: settings.llm_api_key.clone(),
+            chat_model: settings.chat_model.clone(),
+            hub_base_url: settings.hub_base_url.clone(),
+            proxy_url: settings.proxy_url.clone(),
+            proxy_enabled: settings.proxy_enabled,
+            font_size_pt: settings.font_size_pt,
+            display_language: settings.display_language.clone(),
+            knowledge_dir: settings.knowledge_dir.clone(),
+        }
+    }
+}
+
+impl GeneralSettingsUpdate {
+    pub fn normalize_llm_configuration(&mut self) {
+        normalize_llm_configuration_fields(
+            &mut self.llm_base_url,
+            &mut self.llm_api_key,
+            &mut self.chat_model,
+        );
+    }
+}
+
+fn normalize_llm_configuration_fields(
+    llm_base_url: &mut String,
+    llm_api_key: &mut String,
+    chat_model: &mut String,
+) {
+    *llm_base_url = llm_base_url.trim().trim_end_matches('/').to_string();
+    *llm_api_key = llm_api_key.trim().to_string();
+    *chat_model = chat_model.trim().to_string();
+
+    let openrouter_key = llm_api_key.starts_with("sk-or-v1-");
+    let default_openai_endpoint =
+        llm_base_url.is_empty() || *llm_base_url == LEGACY_OPENAI_BASE_URL;
+    if openrouter_key && default_openai_endpoint {
+        *llm_base_url = OPENROUTER_BASE_URL.into();
+    }
+    if (openrouter_key || *llm_base_url == OPENROUTER_BASE_URL)
+        && *chat_model == LEGACY_OPENAI_CHAT_MODEL
+    {
+        *chat_model = OPENROUTER_DEFAULT_CHAT_MODEL.into();
     }
 }
 
@@ -429,9 +485,6 @@ fn ensure_chat_file_change_columns(conn: &Connection) -> AppResult<()> {
     Ok(())
 }
 
-/// Adds `backend`/`backend_status` to `chat_sessions`. Sessions created by
-/// older builds are migrated to `nest`/`ready`; the backfill runs only in the
-/// ALTER branch so later migrations never rewrite fresh unbound sessions.
 fn ensure_chat_session_backend_columns(conn: &Connection) -> AppResult<()> {
     if !table_has_column(conn, "chat_sessions", "backend")? {
         conn.execute("ALTER TABLE chat_sessions ADD COLUMN backend TEXT", [])?;
@@ -694,8 +747,37 @@ pub fn get_settings(conn: &Connection) -> AppResult<AppSettings> {
     Ok(settings)
 }
 
-pub fn save_settings(conn: &Connection, settings: &AppSettings) -> AppResult<()> {
-    save_general_settings(conn, settings)
+fn upsert_settings(conn: &Connection, pairs: &[(&str, String)]) -> AppResult<()> {
+    for (key, value) in pairs {
+        conn.execute(
+            "INSERT INTO settings(key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+    }
+    Ok(())
+}
+
+pub fn save_general_settings(conn: &Connection, settings: &GeneralSettingsUpdate) -> AppResult<()> {
+    let pairs = [
+        ("llm_base_url", settings.llm_base_url.clone()),
+        ("llm_api_key", settings.llm_api_key.clone()),
+        ("chat_model", settings.chat_model.clone()),
+        ("hub_base_url", settings.hub_base_url.clone()),
+        ("proxy_url", settings.proxy_url.trim().to_string()),
+        (
+            "proxy_enabled",
+            if settings.proxy_enabled {
+                "true".into()
+            } else {
+                "false".into()
+            },
+        ),
+        ("font_size_pt", settings.font_size_pt.to_string()),
+        ("display_language", settings.display_language.clone()),
+        ("knowledge_dir", settings.knowledge_dir.trim().to_string()),
+    ];
+    upsert_settings(conn, &pairs)
 }
 
 const HUB_REFRESH_TOKEN_KEY: &str = "hub_refresh_token";
@@ -1231,35 +1313,6 @@ pub fn normalize_claude_custom_models(input: &str) -> String {
     lines.join("\n")
 }
 
-pub fn save_general_settings(conn: &Connection, settings: &AppSettings) -> AppResult<()> {
-    let pairs = [
-        ("llm_base_url", settings.llm_base_url.clone()),
-        ("llm_api_key", settings.llm_api_key.clone()),
-        ("chat_model", settings.chat_model.clone()),
-        ("hub_base_url", settings.hub_base_url.clone()),
-        ("proxy_url", settings.proxy_url.trim().to_string()),
-        (
-            "proxy_enabled",
-            if settings.proxy_enabled {
-                "true".into()
-            } else {
-                "false".into()
-            },
-        ),
-        ("font_size_pt", settings.font_size_pt.to_string()),
-        ("display_language", settings.display_language.clone()),
-        ("knowledge_dir", settings.knowledge_dir.trim().to_string()),
-    ];
-    for (key, value) in pairs {
-        conn.execute(
-            "INSERT INTO settings(key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![key, value],
-        )?;
-    }
-    Ok(())
-}
-
 #[allow(dead_code)]
 pub fn save_claude_settings(
     conn: &Connection,
@@ -1282,14 +1335,7 @@ pub fn save_claude_settings(
             normalize_claude_custom_models(custom_models),
         ),
     ];
-    for (key, value) in pairs {
-        conn.execute(
-            "INSERT INTO settings(key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![key, value],
-        )?;
-    }
-    Ok(())
+    upsert_settings(conn, &pairs)
 }
 
 pub fn add_message(
@@ -2270,12 +2316,9 @@ mod chat_backend_tests {
     fn general_settings_save_never_writes_claude_keys() {
         let conn = migrated_db();
         save_claude_settings(&conn, true, "C:\\claude\\claude.exe", "glm-5.3").unwrap();
-        let mut full = get_settings(&conn).unwrap();
-        full.claude_agent_enabled = false;
-        full.claude_cli_path = "D:\\evil\\override.exe".into();
-        full.claude_custom_models = "hijacked".into();
-        full.chat_model = "gpt-test".into();
-        save_general_settings(&conn, &full).unwrap();
+        let mut general = GeneralSettingsUpdate::from(&get_settings(&conn).unwrap());
+        general.chat_model = "gpt-test".into();
+        save_general_settings(&conn, &general).unwrap();
 
         let reloaded = get_settings(&conn).unwrap();
         assert_eq!(reloaded.chat_model, "gpt-test");
@@ -2285,11 +2328,33 @@ mod chat_backend_tests {
     }
 
     #[test]
+    fn general_settings_update_deserializes_full_app_settings_payload() {
+        let payload = serde_json::json!({
+            "llm_base_url": "https://api.openai.com/v1",
+            "llm_api_key": "sk-x",
+            "chat_model": "gpt-4o-mini",
+            "hub_base_url": "",
+            "proxy_url": "",
+            "proxy_enabled": false,
+            "font_size_pt": 12,
+            "display_language": "en",
+            "knowledge_dir": "",
+            "resolved_knowledge_dir": "",
+            "claude_agent_enabled": true,
+            "claude_cli_path": "D:\\evil\\override.exe",
+            "claude_custom_models": "hijacked"
+        });
+        let update: GeneralSettingsUpdate = serde_json::from_value(payload).unwrap();
+        assert_eq!(update.chat_model, "gpt-4o-mini");
+        assert_eq!(update.llm_base_url, "https://api.openai.com/v1");
+        assert!(update.knowledge_dir.is_empty());
+    }
+
+    #[test]
     fn interleaved_claude_and_general_saves_keep_claude_config() {
         let conn = migrated_db();
         save_claude_settings(&conn, true, "C:\\claude\\claude.exe", "glm-5.3").unwrap();
-        let mut general = get_settings(&conn).unwrap();
-        general.claude_cli_path = "stale".into();
+        let general = GeneralSettingsUpdate::from(&get_settings(&conn).unwrap());
         save_general_settings(&conn, &general).unwrap();
         save_claude_settings(&conn, true, "C:\\claude\\new.exe", "glm-5.3").unwrap();
         let reloaded = get_settings(&conn).unwrap();

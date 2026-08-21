@@ -8,6 +8,7 @@ import type {
   ChatSession,
   DiffPair,
   FileStatus,
+  GeneralSettingsUpdate,
   HubConnectionStatus,
   HubAuthState,
   HubMessagePage,
@@ -103,7 +104,7 @@ export const api = {
       knowledgeDir,
       mode,
     }),
-  settingsSet: (settings: AppSettings) =>
+  settingsSet: (settings: GeneralSettingsUpdate) =>
     invoke<void>("settings_set", { settings }),
 
   indexStatus: () => invoke<IndexStatus>("index_status"),
