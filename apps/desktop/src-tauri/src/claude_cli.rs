@@ -668,6 +668,126 @@ pub async fn probe_version(detection: &ClaudeDetection, timeout: Duration) -> Pr
 }
 
 #[allow(dead_code)]
+pub async fn probe_connection(
+    detection: &ClaudeDetection,
+    probe_session_id: &str,
+    cwd: &Path,
+    timeout: Duration,
+) -> Result<ProbeConnectionOutcome, String> {
+    let args = vec![
+        "-p".to_string(),
+        "--output-format".to_string(),
+        "stream-json".to_string(),
+        "--verbose".to_string(),
+        "--include-partial-messages".to_string(),
+        "--no-session-persistence".to_string(),
+        "--session-id".to_string(),
+        probe_session_id.to_string(),
+    ];
+    let mut command = spawn_command(detection, &args);
+    command.current_dir(cwd);
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("spawn failed: {error}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(b"ok")
+            .await
+            .map_err(|error| format!("prompt write failed: {error}"))?;
+        let _ = stdin.shutdown().await;
+    }
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "no stdout pipe".to_string())?;
+    let stderr = child.stderr.take();
+    let stderr_task = tokio::spawn(read_capped(stderr, MAX_STDERR_BYTES, Keep::Tail));
+
+    let (line_tx, mut line_rx) = tokio::sync::mpsc::channel::<String>(STDOUT_CHANNEL_CAPACITY);
+    let stdout_task = tokio::spawn(async move {
+        let mut reader = BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = reader.next_line().await {
+            if line_tx.send(line).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut parser = StreamParser::new(probe_session_id);
+    let deadline = tokio::time::Instant::now() + timeout;
+    let outcome = loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break Err("timeout".to_string());
+        }
+        tokio::select! {
+            maybe_line = line_rx.recv() => {
+                match maybe_line {
+                    Some(line) => {
+                        if let Err(error) = parser.ingest_line(&line) {
+                            break Err(error.to_string());
+                        }
+                    }
+                    None => break Ok(()),
+                }
+            }
+            _ = tokio::time::sleep(remaining) => {
+                break Err("timeout".to_string());
+            }
+        }
+    };
+    if let Err(message) = outcome {
+        kill_and_reap(&mut child).await;
+        drop(line_rx);
+        let _ = stdout_task.await;
+        let _ = stderr_task.await;
+        return Err(message);
+    }
+    let status = match tokio::time::timeout(Duration::from_secs(30), child.wait()).await {
+        Ok(status) => status,
+        Err(_) => {
+            kill_and_reap(&mut child).await;
+            drop(line_rx);
+            let _ = stdout_task.await;
+            let _ = stderr_task.await;
+            return Err("timeout waiting for process exit".to_string());
+        }
+    };
+    let exit_ok = matches!(&status, Ok(status) if status.success());
+    let stderr_tail = stderr_task.await.unwrap_or_default();
+    let _ = stdout_task.await;
+
+    match parser.finish(exit_ok) {
+        Ok(TurnOutcome::Success {
+            model, cli_version, ..
+        }) => Ok(ProbeConnectionOutcome {
+            resolved_path: detection.resolved_path.clone(),
+            cli_version: cli_version.unwrap_or_default(),
+            effective_model: model.unwrap_or_default(),
+        }),
+        Ok(TurnOutcome::Failed {
+            subtype,
+            sanitized_result,
+            ..
+        }) => Err(format!(
+            "probe failed: {} {}",
+            subtype.unwrap_or_default(),
+            sanitized_result.unwrap_or_default()
+        )
+        .trim()
+        .to_string()),
+        Err(error) => Err(format!("{error} | stderr: {stderr_tail}")),
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ProbeConnectionOutcome {
+    pub resolved_path: String,
+    pub cli_version: String,
+    pub effective_model: String,
+}
+
+#[allow(dead_code)]
 pub async fn run_turn(
     detection: &ClaudeDetection,
     request: ClaudeTurnRequest<'_>,
@@ -2528,6 +2648,66 @@ for (const line of lines) { console.log(line); }
         };
         let error = run(&detection, request).await.unwrap_err();
         assert!(matches!(error, ClaudeTurnError::SessionMismatch { .. }));
+    }
+
+    #[tokio::test]
+    async fn probe_connection_reports_model_and_version() {
+        let fx = Fixture::new("conn-ok");
+        let script = r#"
+const fs = require('fs');
+const args = process.argv.slice(2);
+const prompt = fs.readFileSync(0, 'utf8');
+const sid = args[args.indexOf('--session-id') + 1];
+const noPersist = args.includes('--no-session-persistence');
+const lines = [];
+lines.push(JSON.stringify({type:'system',subtype:'init',session_id:sid,model:'glm-5.3',claude_code_version:'2.1.238'}));
+lines.push(JSON.stringify({type:'result',subtype:'success',session_id:sid,result:'ack:' + prompt + ':' + noPersist}));
+for (const line of lines) { console.log(line); }
+"#;
+        let detection = fx.write_fake_cli(script);
+        let cwd = fx.vault_root();
+        let probe_session = "99999999-9999-4999-8999-999999999999";
+        let outcome = probe_connection(&detection, probe_session, &cwd, Duration::from_secs(30))
+            .await
+            .unwrap();
+        assert_eq!(outcome.effective_model, "glm-5.3");
+        assert_eq!(outcome.cli_version, "2.1.238");
+        assert_eq!(outcome.resolved_path, detection.resolved_path);
+    }
+
+    #[tokio::test]
+    async fn probe_connection_error_result_is_a_failure() {
+        let fx = Fixture::new("conn-err");
+        let script = r#"
+const args = process.argv.slice(2);
+const sid = args[args.indexOf('--session-id') + 1];
+const lines = [];
+lines.push(JSON.stringify({type:'system',subtype:'init',session_id:sid,model:'m',claude_code_version:'v'}));
+lines.push(JSON.stringify({type:'result',subtype:'error_during_execution',session_id:sid,is_error:true,result:'no auth'}));
+for (const line of lines) { console.log(line); }
+"#;
+        let detection = fx.write_fake_cli(script);
+        let cwd = fx.vault_root();
+        let probe_session = "99999999-9999-4999-8999-999999999999";
+        let error = probe_connection(&detection, probe_session, &cwd, Duration::from_secs(30))
+            .await
+            .unwrap_err();
+        assert!(error.contains("no auth"));
+    }
+    #[tokio::test]
+    async fn probe_connection_timeout_kills_the_process() {
+        let fx = Fixture::new("conn-timeout");
+        let detection = fx.write_fake_cli(
+            "console.log(JSON.stringify({type:'system',subtype:'status'})); setInterval(() => {}, 1000);",
+        );
+        let cwd = fx.vault_root();
+        let probe_session = "99999999-9999-4999-8999-999999999999";
+        let started = std::time::Instant::now();
+        let error = probe_connection(&detection, probe_session, &cwd, Duration::from_millis(300))
+            .await
+            .unwrap_err();
+        assert!(error.contains("timeout"));
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[test]

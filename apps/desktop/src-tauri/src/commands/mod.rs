@@ -6,12 +6,14 @@
 //! actually lives in.
 
 mod chat;
+mod claude;
 mod hub;
 mod index;
 mod settings;
 mod vault;
 
 pub use chat::*;
+pub use claude::*;
 pub use hub::*;
 pub use index::*;
 pub use settings::*;
