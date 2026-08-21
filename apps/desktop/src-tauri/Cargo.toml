@@ -37,9 +37,3 @@ tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 base64 = "0.22"
 include_dir = "0.7"
-
-[target.'cfg(windows)'.dependencies]
-windows = { version = "0.61", features = [
-    "Win32_System_JobObjects",
-    "Win32_System_Threading",
-] }
