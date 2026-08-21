@@ -64,6 +64,9 @@ const EMPTY: AppSettings = {
   display_language: "en",
   knowledge_dir: "",
   resolved_knowledge_dir: "",
+  claude_agent_enabled: false,
+  claude_cli_path: "",
+  claude_custom_models: "",
 };
 
 function withCompatibleLlmDefaults(settings: AppSettings): AppSettings {

@@ -415,6 +415,9 @@ export type AppSettings = {
   knowledge_dir: string;
   /** Absolute path currently used for packs (read-only from UI). */
   resolved_knowledge_dir: string;
+  claude_agent_enabled: boolean;
+  claude_cli_path: string;
+  claude_custom_models: string;
 };
 
 export type Citation = {
@@ -449,6 +452,9 @@ export type ChatFileChangeDetail = ChatFileChangeSummary & {
   new_content: string | null;
 };
 
+export type ChatBackend = "nest" | "claude";
+export type ChatBackendStatus = "uninitialized" | "ready" | "unresumable";
+
 export type ChatSessionTitleSource = "placeholder" | "llm" | "manual";
 
 export type ChatSession = {
@@ -460,6 +466,8 @@ export type ChatSession = {
   mode: ChatMode;
   created_at: string;
   updated_at: string;
+  backend: ChatBackend | null;
+  backend_status: ChatBackendStatus;
 };
 
 export type IndexStatus = {

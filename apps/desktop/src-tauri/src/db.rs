@@ -33,13 +33,10 @@ pub struct AppSettings {
     /// Absolute path currently used for packs (not persisted).
     #[serde(default)]
     pub resolved_knowledge_dir: String,
-    /// Whether chat sessions may bind the Claude Agent backend.
     #[serde(default)]
     pub claude_agent_enabled: bool,
-    /// User-configured Claude CLI path. Empty = auto-detect at use time.
     #[serde(default)]
     pub claude_cli_path: String,
-    /// Custom Claude model IDs, one per line. Step 2 consumes this list.
     #[serde(default)]
     pub claude_custom_models: String,
 }
@@ -126,8 +123,6 @@ pub struct Citation {
     pub score: f32,
 }
 
-/// The chat backend a session is immutably bound to. `Nest` is the built-in
-/// Rig agent; `Claude` is the external Claude CLI backend.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ChatBackend {
@@ -135,7 +130,6 @@ pub enum ChatBackend {
     Claude,
 }
 
-#[allow(dead_code)] // wired up by chat_runtime/commands in later Step 1 slices
 impl ChatBackend {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -144,8 +138,6 @@ impl ChatBackend {
         }
     }
 
-    /// Parses a persisted backend value. Unknown values are a diagnosable
-    /// error; they must never silently fall back to `Nest`.
     pub fn parse(value: &str) -> AppResult<Self> {
         match value {
             "nest" => Ok(ChatBackend::Nest),
@@ -157,10 +149,6 @@ impl ChatBackend {
     }
 }
 
-/// Runtime state of a session's backend binding.
-///
-/// `Uninitialized` for Claude sessions means Nest has not yet observed a
-/// matching `system/init`; it does not prove the Claude transcript is absent.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ChatBackendStatus {
@@ -170,7 +158,6 @@ pub enum ChatBackendStatus {
     Unresumable,
 }
 
-#[allow(dead_code)] // wired up by chat_runtime/commands in later Step 1 slices
 impl ChatBackendStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -180,7 +167,6 @@ impl ChatBackendStatus {
         }
     }
 
-    /// Parses a persisted status value. Unknown values are a diagnosable error.
     pub fn parse(value: &str) -> AppResult<Self> {
         match value {
             "uninitialized" => Ok(ChatBackendStatus::Uninitialized),
@@ -205,17 +191,13 @@ pub struct ChatSession {
     pub mode: String,
     pub created_at: String,
     pub updated_at: String,
-    /// Immutable backend binding. `None` until the first message is sent.
     #[serde(default)]
     pub backend: Option<ChatBackend>,
-    /// Backend runtime state; see [`ChatBackendStatus`].
     #[serde(default)]
     pub backend_status: ChatBackendStatus,
 }
 
-/// Session plus its persisted first user message, produced by the atomic
-/// bind-and-insert transaction.
-#[allow(dead_code)] // wired up by chat_runtime/commands in later Step 1 slices
+#[allow(dead_code)]
 pub struct PreparedChatTurn {
     pub session: ChatSession,
     pub user_message: ChatMessage,
@@ -633,35 +615,12 @@ fn ensure_chat_session_columns(conn: &Connection) -> AppResult<()> {
 
 fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatSession> {
     let backend_raw: Option<String> = row.get(8)?;
-    let backend = match backend_raw.as_deref() {
-        None => None,
-        Some("nest") => Some(ChatBackend::Nest),
-        Some("claude") => Some(ChatBackend::Claude),
-        Some(other) => {
-            return Err(rusqlite::Error::FromSqlConversionFailure(
-                8,
-                rusqlite::types::Type::Text,
-                Box::new(crate::error::AppError::msg(format!(
-                    "Unknown chat backend: {other}"
-                ))),
-            ));
-        }
-    };
+    let backend = backend_raw
+        .map(|raw| ChatBackend::parse(&raw).map_err(|error| row_conversion_failure(8, error)))
+        .transpose()?;
     let status_raw: String = row.get(9)?;
-    let backend_status = match status_raw.as_str() {
-        "uninitialized" => ChatBackendStatus::Uninitialized,
-        "ready" => ChatBackendStatus::Ready,
-        "unresumable" => ChatBackendStatus::Unresumable,
-        other => {
-            return Err(rusqlite::Error::FromSqlConversionFailure(
-                9,
-                rusqlite::types::Type::Text,
-                Box::new(crate::error::AppError::msg(format!(
-                    "Unknown chat backend status: {other}"
-                ))),
-            ));
-        }
-    };
+    let backend_status =
+        ChatBackendStatus::parse(&status_raw).map_err(|error| row_conversion_failure(9, error))?;
     Ok(ChatSession {
         id: row.get(0)?,
         title: row.get(1)?,
@@ -674,6 +633,10 @@ fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatSession> {
         backend,
         backend_status,
     })
+}
+
+fn row_conversion_failure(column: usize, error: crate::error::AppError) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(column, rusqlite::types::Type::Text, Box::new(error))
 }
 
 pub fn get_settings(conn: &Connection) -> AppResult<AppSettings> {
@@ -1057,7 +1020,8 @@ pub fn list_sessions(conn: &Connection) -> AppResult<Vec<ChatSession>> {
          ORDER BY pinned DESC, updated_at DESC",
     )?;
     let rows = stmt.query_map([], map_session_row)?;
-    Ok(rows.filter_map(|r| r.ok()).collect())
+    let sessions = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(sessions)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1151,10 +1115,7 @@ pub fn set_session_title_llm(
     Ok(current)
 }
 
-/// Atomically binds the session's backend (if still unbound) and inserts the
-/// first user message in the same transaction. If the session was already
-/// bound, the existing binding wins and the message is still inserted.
-#[allow(dead_code)] // wired up by commands/chat.rs in a later Step 1 slice
+#[allow(dead_code)]
 pub fn bind_backend_and_insert_user_message(
     conn: &mut Connection,
     session_id: &str,
@@ -1176,7 +1137,6 @@ pub fn bind_backend_and_insert_user_message(
     };
 
     match existing_backend {
-        // Already bound: validate the persisted value, keep it as the winner.
         Some(persisted) => {
             ChatBackend::parse(&persisted)?;
         }
@@ -1213,6 +1173,10 @@ pub fn bind_backend_and_insert_user_message(
          VALUES (?1, ?2, 'user', ?3, '', NULL, NULL, ?4)",
         params![message_id, session_id, content, now],
     )?;
+    tx.execute(
+        "UPDATE chat_sessions SET updated_at = ?1 WHERE id = ?2",
+        params![now, session_id],
+    )?;
     tx.commit()?;
 
     let session = get_session(conn, session_id)?
@@ -1232,9 +1196,7 @@ pub fn bind_backend_and_insert_user_message(
     })
 }
 
-/// Persists a backend status transition (e.g. Claude `ready` after a matching
-/// `system/init`, or `unresumable` after a definitive resume failure).
-#[allow(dead_code)] // wired up by the Claude adapter in a later Step 1 slice
+#[allow(dead_code)]
 pub fn set_session_backend_status(
     conn: &Connection,
     session_id: &str,
@@ -1253,9 +1215,7 @@ pub fn set_session_backend_status(
         .ok_or_else(|| crate::error::AppError::msg(format!("Session not found: {session_id}")))
 }
 
-/// Normalizes the custom models textarea: per-line trim, drop empty lines,
-/// dedupe preserving first-seen order.
-#[allow(dead_code)] // wired up by commands/claude.rs in a later Step 1 slice
+#[allow(dead_code)]
 pub fn normalize_claude_custom_models(input: &str) -> String {
     let mut seen = std::collections::HashSet::new();
     let mut lines = Vec::new();
@@ -1271,9 +1231,6 @@ pub fn normalize_claude_custom_models(input: &str) -> String {
     lines.join("\n")
 }
 
-/// Persists general (non-Claude) settings only. The three Claude keys are
-/// owned by [`save_claude_settings`]; this whitelist guarantees the generic
-/// autosave path can never overwrite Claude configuration.
 pub fn save_general_settings(conn: &Connection, settings: &AppSettings) -> AppResult<()> {
     let pairs = [
         ("llm_base_url", settings.llm_base_url.clone()),
@@ -1303,9 +1260,7 @@ pub fn save_general_settings(conn: &Connection, settings: &AppSettings) -> AppRe
     Ok(())
 }
 
-/// Persists the three Claude configuration keys. The exclusive writer for
-/// Claude settings; `claude_save_settings` is the only legitimate caller.
-#[allow(dead_code)] // wired up by commands/claude.rs in a later Step 1 slice
+#[allow(dead_code)]
 pub fn save_claude_settings(
     conn: &Connection,
     enabled: bool,
@@ -2140,7 +2095,6 @@ mod chat_backend_tests {
     #[test]
     fn migration_backfill_runs_once_and_never_touches_new_unbound_sessions() {
         let conn = legacy_db_with_session();
-        // Re-running migrate (as every startup does) must not rewrite state.
         migrate(&conn).unwrap();
         let legacy = get_session(&conn, "legacy").unwrap().unwrap();
         assert_eq!(legacy.backend, Some(ChatBackend::Nest));
@@ -2231,7 +2185,6 @@ mod chat_backend_tests {
             "two",
         )
         .unwrap();
-        // First binding wins; the message is still inserted under Nest.
         assert_eq!(prepared.session.backend, Some(ChatBackend::Nest));
         let messages = list_messages(&conn, &session.id).unwrap();
         assert_eq!(messages.len(), 2);
@@ -2277,6 +2230,31 @@ mod chat_backend_tests {
     }
 
     #[test]
+    fn list_sessions_fails_on_unknown_backend_value() {
+        let conn = migrated_db();
+        create_session(&conn, "a").unwrap();
+        create_session(&conn, "b").unwrap();
+        conn.execute(
+            "UPDATE chat_sessions SET backend = 'grok' WHERE id = (SELECT id FROM chat_sessions ORDER BY created_at LIMIT 1)",
+            [],
+        )
+        .unwrap();
+        assert!(list_sessions(&conn).is_err());
+    }
+
+    #[test]
+    fn first_message_bumps_session_updated_at() {
+        let conn = migrated_db();
+        let session = create_session(&conn, "New chat").unwrap();
+        let before = session.updated_at.clone();
+        let mut conn = conn;
+        bind_backend_and_insert_user_message(&mut conn, &session.id, ChatBackend::Claude, "hi")
+            .unwrap();
+        let after = get_session(&conn, &session.id).unwrap().unwrap();
+        assert_ne!(after.updated_at, before);
+    }
+
+    #[test]
     fn unknown_backend_status_values_fail() {
         let conn = migrated_db();
         let session = create_session(&conn, "New chat").unwrap();
@@ -2292,8 +2270,6 @@ mod chat_backend_tests {
     fn general_settings_save_never_writes_claude_keys() {
         let conn = migrated_db();
         save_claude_settings(&conn, true, "C:\\claude\\claude.exe", "glm-5.3").unwrap();
-        // A full AppSettings (as an old or racing frontend would send)
-        // carries different Claude values into the generic save path.
         let mut full = get_settings(&conn).unwrap();
         full.claude_agent_enabled = false;
         full.claude_cli_path = "D:\\evil\\override.exe".into();
@@ -2302,9 +2278,7 @@ mod chat_backend_tests {
         save_general_settings(&conn, &full).unwrap();
 
         let reloaded = get_settings(&conn).unwrap();
-        // General field went through.
         assert_eq!(reloaded.chat_model, "gpt-test");
-        // Claude fields were NOT overwritten by the generic save.
         assert!(reloaded.claude_agent_enabled);
         assert_eq!(reloaded.claude_cli_path, "C:\\claude\\claude.exe");
         assert_eq!(reloaded.claude_custom_models, "glm-5.3");
@@ -2314,11 +2288,9 @@ mod chat_backend_tests {
     fn interleaved_claude_and_general_saves_keep_claude_config() {
         let conn = migrated_db();
         save_claude_settings(&conn, true, "C:\\claude\\claude.exe", "glm-5.3").unwrap();
-        // Generic autosave fires in between with stale Claude values.
         let mut general = get_settings(&conn).unwrap();
         general.claude_cli_path = "stale".into();
         save_general_settings(&conn, &general).unwrap();
-        // Claude save runs after (user pressed Save and connect).
         save_claude_settings(&conn, true, "C:\\claude\\new.exe", "glm-5.3").unwrap();
         let reloaded = get_settings(&conn).unwrap();
         assert_eq!(reloaded.claude_cli_path, "C:\\claude\\new.exe");
