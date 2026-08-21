@@ -1,5 +1,7 @@
 use crate::error::AppError;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClaudeErrorCode {
@@ -35,7 +37,6 @@ pub struct ClaudeError {
     detail: String,
 }
 
-#[allow(dead_code)]
 impl ClaudeError {
     pub fn new(code: ClaudeErrorCode, detail: impl Into<String>) -> Self {
         Self {
@@ -46,6 +47,10 @@ impl ClaudeError {
 
     pub fn code(&self) -> ClaudeErrorCode {
         self.code
+    }
+
+    fn detail(&self) -> &str {
+        &self.detail
     }
 }
 
@@ -375,6 +380,435 @@ fn wrapper_relative() -> PathBuf {
         .join("@anthropic-ai")
         .join("claude-code")
         .join("cli-wrapper.cjs")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum TurnMode {
+    NewSession,
+    Resume,
+}
+
+#[derive(Debug, Clone)]
+pub struct ClaudeTurnRequest<'a> {
+    pub vault_root: &'a Path,
+    pub session_id: &'a str,
+    pub mode: TurnMode,
+    pub prompt: &'a str,
+    pub fallback_resume_on_id_in_use: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeTurnResult {
+    pub answer: String,
+    pub thinking: String,
+    pub model: Option<String>,
+    pub cli_version: Option<String>,
+    pub used_fallback_resume: bool,
+}
+
+pub struct TurnEvents {
+    pub token: Box<dyn Fn(&str) + Send + Sync>,
+    pub thinking: Box<dyn Fn(&str) + Send + Sync>,
+    pub initialized: Box<dyn Fn(&str) + Send + Sync>,
+}
+
+impl Default for TurnEvents {
+    fn default() -> Self {
+        Self {
+            token: Box::new(|_| {}),
+            thinking: Box::new(|_| {}),
+            initialized: Box::new(|_| {}),
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub const PROBE_VERSION_TIMEOUT: Duration = Duration::from_secs(10);
+
+pub type CancelToken = std::sync::Arc<std::sync::atomic::AtomicBool>;
+
+pub fn never_cancel() -> CancelToken {
+    std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))
+}
+
+fn version_args() -> Vec<String> {
+    vec!["--version".to_string()]
+}
+
+fn turn_args(mode: TurnMode, session_id: &str) -> Vec<String> {
+    let mut args = vec![
+        "-p".to_string(),
+        "--output-format".to_string(),
+        "stream-json".to_string(),
+        "--verbose".to_string(),
+        "--include-partial-messages".to_string(),
+        "--max-turns".to_string(),
+        "1".to_string(),
+    ];
+    match mode {
+        TurnMode::NewSession => {
+            args.push("--session-id".to_string());
+            args.push(session_id.to_string());
+        }
+        TurnMode::Resume => {
+            args.push("--resume".to_string());
+            args.push(session_id.to_string());
+        }
+    }
+    args
+}
+
+fn spawn_command(
+    detection: &ClaudeDetection,
+    args: &[String],
+) -> Result<tokio::process::Command, ClaudeError> {
+    let mut command = match &detection.launch_target {
+        ClaudeLaunchTarget::Executable { executable } => {
+            let mut command = tokio::process::Command::new(executable);
+            command.args(args);
+            command
+        }
+        ClaudeLaunchTarget::NodeScript {
+            node_executable,
+            script,
+        } => {
+            let mut command = tokio::process::Command::new(node_executable);
+            command.arg(script).args(args);
+            command
+        }
+    };
+    command
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    Ok(command)
+}
+
+fn strip_ansi(text: &str) -> String {
+    let mut cleaned = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            while let Some(&next) = chars.peek() {
+                chars.next();
+                if next.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            cleaned.push(c);
+        }
+    }
+    cleaned
+}
+
+pub fn is_session_id_in_use_error(stderr: &str) -> bool {
+    let cleaned = strip_ansi(stderr);
+    cleaned.contains("Session ID") && cleaned.contains("is already in use")
+}
+
+#[allow(dead_code)]
+pub fn is_no_conversation_found_error(stderr: &str) -> bool {
+    let cleaned = strip_ansi(stderr);
+    cleaned.contains("No conversation found")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum ProbeOutcome {
+    Version(String),
+    Failed { stderr_tail: String },
+}
+
+#[allow(dead_code)]
+pub async fn probe_version(detection: &ClaudeDetection, timeout: Duration) -> ProbeOutcome {
+    let mut command = match spawn_command(detection, &version_args()) {
+        Ok(command) => command,
+        Err(error) => {
+            return ProbeOutcome::Failed {
+                stderr_tail: error.detail().to_string(),
+            }
+        }
+    };
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            return ProbeOutcome::Failed {
+                stderr_tail: error.to_string(),
+            }
+        }
+    };
+    drop(child.stdin.take());
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let output = collect_outputs(&mut child, stdout, stderr, Some(timeout)).await;
+    if !output.exit_ok {
+        return ProbeOutcome::Failed {
+            stderr_tail: preview(&output.stderr),
+        };
+    }
+    let first_token = output
+        .stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .and_then(|line| line.split_whitespace().next())
+        .unwrap_or_default()
+        .to_string();
+    if first_token.is_empty() {
+        return ProbeOutcome::Failed {
+            stderr_tail: "no version output".to_string(),
+        };
+    }
+    ProbeOutcome::Version(first_token)
+}
+
+struct ProcessOutput {
+    stdout: String,
+    stderr: String,
+    exit_ok: bool,
+}
+
+async fn collect_outputs(
+    child: &mut tokio::process::Child,
+    stdout: Option<tokio::process::ChildStdout>,
+    stderr: Option<tokio::process::ChildStderr>,
+    timeout: Option<Duration>,
+) -> ProcessOutput {
+    let stdout_task = tokio::spawn(read_all(stdout));
+    let stderr_task = tokio::spawn(read_all(stderr));
+    let status = match timeout {
+        Some(limit) => match tokio::time::timeout(limit, child.wait()).await {
+            Ok(status) => status,
+            Err(_) => {
+                kill_process_tree(child);
+                child.wait().await
+            }
+        },
+        None => child.wait().await,
+    };
+    let stdout = stdout_task.await.unwrap_or_default();
+    let stderr = stderr_task.await.unwrap_or_default();
+    let exit_ok = status.map(|status| status.success()).unwrap_or(false);
+    ProcessOutput {
+        stdout,
+        stderr,
+        exit_ok,
+    }
+}
+
+async fn read_all<R: tokio::io::AsyncRead + Unpin>(stream: Option<R>) -> String {
+    use tokio::io::AsyncReadExt;
+    let mut buffer = String::new();
+    let Some(mut stream) = stream else {
+        return buffer;
+    };
+    let mut chunk = [0u8; 8192];
+    loop {
+        match stream.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => buffer.push_str(&String::from_utf8_lossy(&chunk[..n])),
+        }
+    }
+    buffer
+}
+
+#[cfg(windows)]
+fn kill_process_tree(child: &mut tokio::process::Child) {
+    if let Some(pid) = child.id() {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/T", "/F", "/PID", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
+#[cfg(not(windows))]
+fn kill_process_tree(child: &mut tokio::process::Child) {
+    let _ = child.start_kill();
+}
+
+async fn cancel_notify(cancel: &CancelToken) {
+    while !cancel.load(std::sync::atomic::Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+#[allow(dead_code)]
+pub async fn run_turn(
+    detection: &ClaudeDetection,
+    request: ClaudeTurnRequest<'_>,
+    events: &TurnEvents,
+) -> Result<ClaudeTurnResult, ClaudeError> {
+    run_turn_with_cancel(detection, request, events, &never_cancel()).await
+}
+
+pub async fn run_turn_with_cancel(
+    detection: &ClaudeDetection,
+    request: ClaudeTurnRequest<'_>,
+    events: &TurnEvents,
+    cancel: &CancelToken,
+) -> Result<ClaudeTurnResult, ClaudeError> {
+    let primary = execute_single_turn(detection, &request, events, cancel).await;
+    match primary {
+        Ok(result) => Ok(result),
+        Err(error)
+            if request.fallback_resume_on_id_in_use
+                && error.code() == ClaudeErrorCode::ProcessFailed
+                && is_session_id_in_use_error(error.detail()) =>
+        {
+            let mut fallback_request = request.clone();
+            fallback_request.mode = TurnMode::Resume;
+            let mut result =
+                execute_single_turn(detection, &fallback_request, events, cancel).await?;
+            result.used_fallback_resume = true;
+            Ok(result)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn execute_single_turn(
+    detection: &ClaudeDetection,
+    request: &ClaudeTurnRequest<'_>,
+    events: &TurnEvents,
+    cancel: &CancelToken,
+) -> Result<ClaudeTurnResult, ClaudeError> {
+    let args = turn_args(request.mode, request.session_id);
+    let mut command = spawn_command(detection, &args)?;
+    command.current_dir(request.vault_root);
+    let mut child = command.spawn().map_err(|error| {
+        ClaudeError::new(
+            ClaudeErrorCode::ProcessFailed,
+            format!("failed to spawn CLI: {error}"),
+        )
+    })?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(request.prompt.as_bytes())
+            .await
+            .map_err(|error| {
+                ClaudeError::new(
+                    ClaudeErrorCode::ProcessFailed,
+                    format!("failed to write prompt: {error}"),
+                )
+            })?;
+        let _ = stdin.shutdown().await;
+    }
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| ClaudeError::new(ClaudeErrorCode::ProcessFailed, "no stdout pipe"))?;
+    let stderr = child.stderr.take();
+    let mut stdout_reader = BufReader::new(stdout).lines();
+    let stderr_task = tokio::spawn(read_all(stderr));
+
+    let mut parser = StreamParser::new(request.session_id);
+    let mut parse_error: Option<ClaudeError> = None;
+
+    let (line_tx, mut line_rx) = tokio::sync::mpsc::unbounded_channel::<Option<String>>();
+    tokio::spawn(async move {
+        loop {
+            match stdout_reader.next_line().await {
+                Ok(Some(line)) => {
+                    if line_tx.send(Some(line)).is_err() {
+                        break;
+                    }
+                }
+                Ok(None) | Err(_) => {
+                    let _ = line_tx.send(None);
+                    break;
+                }
+            }
+        }
+    });
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel_notify(cancel) => {
+                kill_process_tree(&mut child);
+                let _ = child.wait().await;
+                return Err(ClaudeError::new(ClaudeErrorCode::ProcessFailed, "cancelled"));
+            }
+            maybe_line = line_rx.recv() => {
+                match maybe_line {
+                    Some(Some(line)) => {
+                        match parser.ingest_line(&line) {
+                            Ok(Some(ParserEvent::Token(text))) => (events.token)(&text),
+                            Ok(Some(ParserEvent::Thinking(text))) => (events.thinking)(&text),
+                            Ok(Some(ParserEvent::Initialized { session_id, .. })) => {
+                                (events.initialized)(&session_id)
+                            }
+                            Ok(None) => {}
+                            Err(error) => {
+                                parse_error = Some(error);
+                                kill_process_tree(&mut child);
+                                let _ = child.wait().await;
+                                break;
+                            }
+                        }
+                    }
+                    Some(None) | None => break,
+                }
+            }
+        }
+    }
+
+    if let Some(error) = parse_error {
+        return Err(error);
+    }
+
+    let status = child.wait().await;
+    let exit_ok = matches!(&status, Ok(status) if status.success());
+    let stderr_text = stderr_task.await.unwrap_or_default();
+
+    match parser.finish(exit_ok) {
+        Ok(TurnOutcome::Success {
+            answer,
+            thinking,
+            model,
+            cli_version,
+            ..
+        }) => Ok(ClaudeTurnResult {
+            answer,
+            thinking,
+            model,
+            cli_version,
+            used_fallback_resume: false,
+        }),
+        Ok(TurnOutcome::Failed {
+            code,
+            subtype,
+            sanitized_result,
+            ..
+        }) => {
+            let mut detail = match (subtype, sanitized_result) {
+                (Some(subtype), Some(text)) => format!("{subtype}: {text}"),
+                (Some(subtype), None) => subtype,
+                (None, Some(text)) => text,
+                (None, None) => "turn failed".to_string(),
+            };
+            if code == ClaudeErrorCode::ProcessFailed && !stderr_text.trim().is_empty() {
+                detail = format!("{detail} | stderr: {}", preview(&stderr_text));
+            }
+            Err(ClaudeError::new(code, detail))
+        }
+        Err(error) => {
+            if !stderr_text.trim().is_empty() {
+                Err(ClaudeError::new(
+                    error.code(),
+                    format!("{} | stderr: {}", error.detail(), preview(&stderr_text)),
+                ))
+            } else {
+                Err(error)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1472,5 +1906,367 @@ mod parser_tests {
             panic!("expected success");
         };
         assert_eq!(thinking, "deep");
+    }
+}
+
+#[cfg(test)]
+mod process_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
+    const SESSION: &str = "11111111-2222-4333-8444-555555555555";
+
+    struct Fixture {
+        root: PathBuf,
+    }
+
+    impl Fixture {
+        fn new(name: &str) -> Fixture {
+            let root = std::env::temp_dir().join(format!(
+                "nest-claude-proc-test-{}-{}",
+                name,
+                uuid::Uuid::new_v4()
+            ));
+            std::fs::create_dir_all(&root).unwrap();
+            Fixture { root }
+        }
+
+        fn write_fake_cli(&self, script_body: &str) -> ClaudeDetection {
+            let script = self.root.join("fake-claude.cjs");
+            std::fs::write(&script, script_body).unwrap();
+            let node = which_node();
+            ClaudeDetection {
+                configured_path: script.to_string_lossy().to_string(),
+                resolved_path: script.to_string_lossy().to_string(),
+                launch_target: ClaudeLaunchTarget::NodeScript {
+                    node_executable: node,
+                    script,
+                },
+            }
+        }
+
+        fn vault_root(&self) -> PathBuf {
+            let vault = self.root.join("vault");
+            std::fs::create_dir_all(&vault).unwrap();
+            vault
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn which_node() -> PathBuf {
+        let path_env = std::env::var("PATH").unwrap_or_default();
+        let node = collect_search_dirs(&path_env)
+            .into_iter()
+            .map(|dir| dir.join("node.exe"))
+            .find(|node| node.is_file());
+        node.expect("node.exe must be available for process tests")
+    }
+
+    async fn run(
+        detection: &ClaudeDetection,
+        request: ClaudeTurnRequest<'_>,
+    ) -> Result<ClaudeTurnResult, ClaudeError> {
+        let cancel = never_cancel();
+        let events = TurnEvents::default();
+        run_turn_with_cancel(detection, request, &events, &cancel).await
+    }
+
+    fn ok_script() -> String {
+        format!(
+            r#"
+const args = process.argv.slice(2);
+const sid = {sid_helper};
+const lines = [];
+lines.push(JSON.stringify({{type:'system',subtype:'init',session_id:sid,model:'fake-model',claude_code_version:'9.9.9'}}));
+lines.push(JSON.stringify({{type:'stream_event',event:{{type:'content_block_delta',index:1,delta:{{type:'text_delta',text:'hel'}}}}}}));
+lines.push(JSON.stringify({{type:'stream_event',event:{{type:'content_block_delta',index:1,delta:{{type:'text_delta',text:'lo'}}}}}}));
+lines.push(JSON.stringify({{type:'assistant',message:{{content:[{{type:'text',text:'hello'}}]}}}}));
+lines.push(JSON.stringify({{type:'result',subtype:'success',session_id:sid,result:'hello'}}));
+for (const line of lines) {{ console.log(line); }}
+"#,
+            sid_helper = sid_helper_js()
+        )
+    }
+
+    fn sid_helper_js() -> &'static str {
+        r#"(args.includes('--session-id') ? args[args.indexOf('--session-id') + 1] : args[args.indexOf('--resume') + 1])"#
+    }
+
+    fn args_echo_script(result_prefix: &str) -> String {
+        format!(
+            r#"
+const fs = require('fs');
+const args = process.argv.slice(2);
+const prompt = fs.readFileSync(0, 'utf8');
+const sid = {sid_helper};
+const mode = args.includes('--session-id') ? 'new' : (args.includes('--resume') ? 'resume' : 'none');
+const lines = [];
+lines.push(JSON.stringify({{type:'system',subtype:'init',session_id:sid,model:'m',claude_code_version:'v'}}));
+lines.push(JSON.stringify({{type:'result',subtype:'success',session_id:sid,result:'{prefix}:' + mode + ':' + prompt}}));
+for (const line of lines) {{ console.log(line); }}
+"#,
+            sid_helper = sid_helper_js(),
+            prefix = result_prefix
+        )
+    }
+
+    #[tokio::test]
+    async fn probe_version_reads_first_token() {
+        let fx = Fixture::new("probe");
+        let detection = fx.write_fake_cli("console.log('3.7.1 (Claude Code)');");
+        let outcome = probe_version(&detection, PROBE_VERSION_TIMEOUT).await;
+        assert_eq!(outcome, ProbeOutcome::Version("3.7.1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn probe_version_failure_carries_stderr_tail() {
+        let fx = Fixture::new("probe-fail");
+        let detection = fx.write_fake_cli("console.error('boom'); process.exit(1);");
+        let outcome = probe_version(&detection, PROBE_VERSION_TIMEOUT).await;
+        match outcome {
+            ProbeOutcome::Failed { stderr_tail } => assert!(stderr_tail.contains("boom")),
+            other => panic!("expected failure, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn turn_streams_tokens_and_returns_answer() {
+        let fx = Fixture::new("turn-ok");
+        let detection = fx.write_fake_cli(&ok_script());
+        let tokens = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let token_sink = tokens.clone();
+        let events = TurnEvents {
+            token: Box::new(move |text: &str| {
+                token_sink.lock().unwrap().push(text.to_string());
+            }),
+            ..TurnEvents::default()
+        };
+        let request = ClaudeTurnRequest {
+            vault_root: &fx.vault_root(),
+            session_id: SESSION,
+            mode: TurnMode::NewSession,
+            prompt: "hi",
+            fallback_resume_on_id_in_use: false,
+        };
+        let cancel = never_cancel();
+        let result = run_turn_with_cancel(&detection, request, &events, &cancel)
+            .await
+            .unwrap();
+        assert_eq!(result.answer, "hello");
+        assert_eq!(result.model.as_deref(), Some("fake-model"));
+        assert_eq!(result.cli_version.as_deref(), Some("9.9.9"));
+        assert!(!result.used_fallback_resume);
+        let streamed = tokens.lock().unwrap().join("");
+        assert_eq!(streamed, "hello");
+    }
+
+    #[tokio::test]
+    async fn turn_passes_session_and_mode_args_and_reads_prompt_from_stdin() {
+        let fx = Fixture::new("turn-args");
+        let detection = fx.write_fake_cli(&args_echo_script("mode"));
+        let request = ClaudeTurnRequest {
+            vault_root: &fx.vault_root(),
+            session_id: SESSION,
+            mode: TurnMode::NewSession,
+            prompt: "from stdin",
+            fallback_resume_on_id_in_use: false,
+        };
+        let result = run(&detection, request).await.unwrap();
+        assert_eq!(result.answer, "mode:new:from stdin");
+    }
+
+    #[tokio::test]
+    async fn resume_mode_passes_resume_arg() {
+        let fx = Fixture::new("turn-resume");
+        let detection = fx.write_fake_cli(&args_echo_script("mode"));
+        let request = ClaudeTurnRequest {
+            vault_root: &fx.vault_root(),
+            session_id: SESSION,
+            mode: TurnMode::Resume,
+            prompt: "next",
+            fallback_resume_on_id_in_use: false,
+        };
+        let result = run(&detection, request).await.unwrap();
+        assert_eq!(result.answer, "mode:resume:next");
+    }
+
+    #[tokio::test]
+    async fn id_in_use_triggers_single_transparent_resume() {
+        let fx = Fixture::new("turn-fallback");
+        let script = format!(
+            r#"
+const fs = require('fs');
+const args = process.argv.slice(2);
+const prompt = fs.readFileSync(0, 'utf8');
+const sid = {sid_helper};
+const attempts = fs.existsSync('attempts.txt') ? parseInt(fs.readFileSync('attempts.txt','utf8'), 10) : 0;
+fs.writeFileSync('attempts.txt', String(attempts + 1));
+let lines;
+if (attempts === 0) {{
+  console.error('Error: Session ID ' + sid + ' is already in use.');
+  process.exit(2);
+}} else {{
+  lines = [];
+  lines.push(JSON.stringify({{type:'system',subtype:'init',session_id:sid,model:'m',claude_code_version:'v'}}));
+  lines.push(JSON.stringify({{type:'result',subtype:'success',session_id:sid,result:'recovered:' + prompt}}));
+  for (const line of lines) {{ console.log(line); }}
+}}
+"#,
+            sid_helper = sid_helper_js()
+        );
+        let detection = fx.write_fake_cli(&script);
+        let request = ClaudeTurnRequest {
+            vault_root: &fx.vault_root(),
+            session_id: SESSION,
+            mode: TurnMode::NewSession,
+            prompt: "retry me",
+            fallback_resume_on_id_in_use: true,
+        };
+        let result = run(&detection, request).await.unwrap();
+        assert_eq!(result.answer, "recovered:retry me");
+        assert!(result.used_fallback_resume);
+    }
+
+    #[tokio::test]
+    async fn id_in_use_without_fallback_flag_fails() {
+        let fx = Fixture::new("turn-nofallback");
+        let script = r#"
+console.error('Error: Session ID whatever is already in use.');
+process.exit(2);
+"#;
+        let detection = fx.write_fake_cli(script);
+        let request = ClaudeTurnRequest {
+            vault_root: &fx.vault_root(),
+            session_id: SESSION,
+            mode: TurnMode::NewSession,
+            prompt: "hi",
+            fallback_resume_on_id_in_use: false,
+        };
+        let error = run(&detection, request).await.unwrap_err();
+        assert_eq!(error.code(), ClaudeErrorCode::ProcessFailed);
+        assert!(is_session_id_in_use_error(error.detail()));
+    }
+
+    #[tokio::test]
+    async fn error_result_becomes_failed_turn_with_subtype() {
+        let fx = Fixture::new("turn-error-result");
+        let script = format!(
+            r#"
+const args = process.argv.slice(2);
+const sid = {sid_helper};
+const lines = [];
+lines.push(JSON.stringify({{type:'system',subtype:'init',session_id:sid,model:'m',claude_code_version:'v'}}));
+lines.push(JSON.stringify({{type:'result',subtype:'error_during_execution',session_id:sid,is_error:true,result:'exploded'}}));
+for (const line of lines) {{ console.log(line); }}
+"#,
+            sid_helper = sid_helper_js()
+        );
+        let detection = fx.write_fake_cli(&script);
+        let request = ClaudeTurnRequest {
+            vault_root: &fx.vault_root(),
+            session_id: SESSION,
+            mode: TurnMode::NewSession,
+            prompt: "hi",
+            fallback_resume_on_id_in_use: false,
+        };
+        let error = run(&detection, request).await.unwrap_err();
+        assert_eq!(error.code(), ClaudeErrorCode::Protocol);
+        assert!(error.detail().contains("error_during_execution"));
+        assert!(error.detail().contains("exploded"));
+    }
+
+    #[tokio::test]
+    async fn non_zero_exit_without_result_is_process_failure() {
+        let fx = Fixture::new("turn-crash");
+        let detection = fx.write_fake_cli("process.exit(1);");
+        let request = ClaudeTurnRequest {
+            vault_root: &fx.vault_root(),
+            session_id: SESSION,
+            mode: TurnMode::NewSession,
+            prompt: "hi",
+            fallback_resume_on_id_in_use: false,
+        };
+        let error = run(&detection, request).await.unwrap_err();
+        assert_eq!(error.code(), ClaudeErrorCode::ProcessFailed);
+    }
+
+    #[tokio::test]
+    async fn cancel_token_terminates_the_turn() {
+        let fx = Fixture::new("turn-cancel");
+        let detection = fx.write_fake_cli(
+            "console.log(JSON.stringify({type:'system',subtype:'status'})); setInterval(() => {}, 1000);",
+        );
+        let cancel: CancelToken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let request = ClaudeTurnRequest {
+            vault_root: &fx.vault_root(),
+            session_id: SESSION,
+            mode: TurnMode::NewSession,
+            prompt: "hi",
+            fallback_resume_on_id_in_use: false,
+        };
+        let events = TurnEvents::default();
+        let cancel_for_task = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            cancel_for_task.store(true, Ordering::SeqCst);
+        });
+        let started = std::time::Instant::now();
+        let error = run_turn_with_cancel(&detection, request, &events, &cancel)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), ClaudeErrorCode::ProcessFailed);
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn spawn_failure_reports_process_error() {
+        let fx = Fixture::new("turn-nospawn");
+        let missing = fx.root.join("does-not-exist.cjs");
+        let detection = ClaudeDetection {
+            configured_path: String::new(),
+            resolved_path: String::new(),
+            launch_target: ClaudeLaunchTarget::NodeScript {
+                node_executable: which_node(),
+                script: missing,
+            },
+        };
+        let request = ClaudeTurnRequest {
+            vault_root: &fx.vault_root(),
+            session_id: SESSION,
+            mode: TurnMode::NewSession,
+            prompt: "hi",
+            fallback_resume_on_id_in_use: false,
+        };
+        let error = run(&detection, request).await.unwrap_err();
+        assert_eq!(error.code(), ClaudeErrorCode::ProcessFailed);
+    }
+
+    #[test]
+    fn error_matchers_ignore_ansi_and_match_real_cli_text() {
+        assert!(is_session_id_in_use_error(
+            "Error: Session ID 6f1c2a9e-... is already in use."
+        ));
+        assert!(is_session_id_in_use_error(
+            "\u{1b}[31mError: Session ID x is already in use.\u{1b}[0m"
+        ));
+        assert!(!is_session_id_in_use_error("some other failure"));
+        assert!(is_no_conversation_found_error(
+            "No conversation found with session ID: 00000000-..."
+        ));
+        assert!(!is_no_conversation_found_error(
+            "Session ID x is already in use."
+        ));
+    }
+
+    #[test]
+    fn strip_ansi_removes_escape_sequences() {
+        assert_eq!(strip_ansi("\u{1b}[31mred\u{1b}[0m"), "red");
+        assert_eq!(strip_ansi("plain"), "plain");
     }
 }
