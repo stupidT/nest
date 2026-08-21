@@ -9,6 +9,7 @@ import {
   Pin,
   PinOff,
   Plus,
+  Sparkles,
   Trash2,
 } from "lucide-react";
 import { useMemo, useState } from "react";
@@ -335,11 +336,17 @@ function HistoryRow({
     >
       <button
         type="button"
-        className="min-w-0 flex-1 truncate px-1 py-1.5 text-left text-sm hover:underline"
+        className="flex min-w-0 flex-1 items-center gap-1.5 truncate px-1 py-1.5 text-left text-sm hover:underline"
         onClick={onOpen}
         title={session.title}
       >
-        {session.title}
+        {session.backend === "claude" && (
+          <Sparkles
+            className="size-3 shrink-0 text-primary"
+            aria-label="Claude Agent"
+          />
+        )}
+        <span className="truncate">{session.title}</span>
       </button>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>

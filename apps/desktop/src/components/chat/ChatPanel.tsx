@@ -4,7 +4,7 @@ import {
   MessageScroller,
   useMessageScroller,
 } from "@shadcn/react/message-scroller";
-import { AlertCircle, Check, ChevronDown, FilePenLine, Lightbulb, Loader2, X } from "lucide-react";
+import { AlertCircle, Check, ChevronDown, FilePenLine, Info, Lightbulb, Loader2, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   AgentStatusIndicator,
@@ -142,7 +142,49 @@ export function ChatPanel() {
   });
 
   const sessions: ChatSession[] = sessionsQuery.data ?? [];
-  const mode: ChatMode = sessions.find((session) => session.id === sessionId)?.mode ?? "ask";
+  const currentSession = sessions.find((session) => session.id === sessionId);
+  const mode: ChatMode = currentSession?.mode ?? "ask";
+
+  const claudeConnectionQuery = useQuery({
+    queryKey: queryKeys.claudeConnection,
+    queryFn: api.claudeConnectionStatus,
+  });
+  const claudeEnabled = claudeConnectionQuery.data?.connected ?? false;
+  const claudeConfigured =
+    claudeConnectionQuery.data?.configured_cli_path !== undefined;
+
+  const sessionBackend = currentSession?.backend ?? null;
+  const sessionBackendStatus = currentSession?.backend_status ?? "uninitialized";
+
+  const composerBlocked: string | null = (() => {
+    if (isSending) return null;
+    if (sessionBackend === "claude") {
+      if (sessionBackendStatus === "unresumable") {
+        return "This Claude conversation can no longer be resumed. Start a new chat.";
+      }
+      if (!claudeConfigured) {
+        return "Claude Agent is disabled. Re-enable it in Settings to continue this chat.";
+      }
+      if (!claudeEnabled) {
+        return "Claude connection is unavailable. Fix it in Settings to continue this chat.";
+      }
+      return null;
+    }
+    if (sessionBackend === null && claudeConfigured && !claudeEnabled) {
+      return "Claude Agent is enabled but not connected. Test the connection in Settings before chatting.";
+    }
+    return null;
+  })();
+
+  const backendNotice: string | null = (() => {
+    if (sessionBackend === "claude" && !claudeEnabled && claudeConfigured) {
+      return "Settings changes apply to new chats only.";
+    }
+    if (sessionBackend === "nest" && claudeEnabled) {
+      return "Settings changes apply to new chats only.";
+    }
+    return null;
+  })();
 
   const changeMode = (nextMode: ChatMode) => {
     if (!sessionId || isSending || nextMode === mode) return;
@@ -514,10 +556,41 @@ export function ChatPanel() {
       </MessageScroller.Provider>
 
       <div className="shrink-0 px-3 pb-3 pt-4">
+        {composerBlocked && (
+          <p className="mb-2 flex items-center gap-1.5 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+            <AlertCircle className="size-3.5 shrink-0" />
+            {composerBlocked}
+          </p>
+        )}
+        {!composerBlocked && backendNotice && (
+          <p className="mb-2 flex items-center justify-between gap-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+            <span className="flex items-center gap-1.5">
+              <Info className="size-3.5 shrink-0" />
+              {backendNotice}
+            </span>
+            <button
+              type="button"
+              className="shrink-0 font-medium text-primary hover:underline"
+              onClick={() => {
+                void api.chatCreateSession().then((session) => {
+                  queryClient.setQueryData<ChatSession[]>(
+                    queryKeys.chatSessions,
+                    (current) => [session, ...(current ?? [])],
+                  );
+                  openChatTab(session.id);
+                }).catch((e: unknown) =>
+                  setStatusMessage(appErrorMessage(e, "Could not start a new chat")),
+                );
+              }}
+            >
+              New chat
+            </button>
+          </p>
+        )}
         <MentionComposer
           candidates={mentionCandidates}
           isGenerating={isGeneratingHere}
-          canSend={!!sessionId && !isSending}
+          canSend={!!sessionId && !isSending && !composerBlocked}
           onSend={(query, focusPaths) => {
             if (!sessionId) return;
             send.mutate({
