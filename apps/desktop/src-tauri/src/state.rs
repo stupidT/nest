@@ -33,6 +33,8 @@ pub struct AppState {
     vault_root: Mutex<PathBuf>,
     indexing: IndexingState,
     chat_cancel: watch::Sender<bool>,
+    claude_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub claude_connection: Mutex<Option<crate::db::ClaudeConnectionReport>>,
     pub hub_auth: Mutex<Option<AuthSession>>,
     pub hub_auth_refresh: tokio::sync::Mutex<()>,
 }
@@ -57,6 +59,8 @@ impl AppState {
             vault_root: Mutex::new(vault_root),
             indexing: IndexingState::new(),
             chat_cancel: watch::channel(false).0,
+            claude_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            claude_connection: Mutex::new(None),
             hub_auth: Mutex::new(None),
             hub_auth_refresh: tokio::sync::Mutex::new(()),
         })
@@ -118,6 +122,15 @@ impl AppState {
 
     pub fn request_chat_cancel(&self) {
         self.chat_cancel.send_replace(true);
+        self.claude_cancel
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn begin_chat_cancel_arc(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.chat_cancel.send_replace(false);
+        self.claude_cancel
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        self.claude_cancel.clone()
     }
 }
 

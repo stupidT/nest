@@ -1,7 +1,7 @@
 //! Chat session/message CRUD and the streaming `chat_send` command.
 
-use crate::agent;
 use crate::chat_events;
+use crate::chat_runtime;
 use crate::db::{self, ChatMessage, ChatSession};
 use crate::error::AppResult;
 use crate::indexing;
@@ -191,25 +191,31 @@ pub async fn chat_send(
     }
     let app_data_dir = state.app_data_dir.clone();
 
-    // Persist the user turn first for durable history / UI refresh.
-    {
-        let mut conn = state.db.lock();
-        db::add_message(
-            &mut conn,
-            &session_id,
-            db::NewChatMessage {
-                role: "user",
-                content: &query,
-                citations: None,
-                thinking: None,
-                thinking_seconds: None,
-                file_changes: &[],
-            },
-        )?;
+    let claude_available = chat_runtime::claude_available(&settings);
+    let claude_connected = claude_available
+        && state
+            .claude_connection
+            .lock()
+            .as_ref()
+            .is_some_and(|report| report.is_connected(&settings.claude_cli_path));
+    if claude_available && !claude_connected {
+        return Err(crate::error::AppError::msg(
+            "claude_unavailable: test the Claude connection in Settings before chatting",
+        ));
     }
 
-    // Build prior turns for the agent, excluding the just-saved user message
-    // so `stream_chat(query, …)` does not duplicate it.
+    // Atomically bind the backend (if unbound) and persist the user turn.
+    let requested_backend = if claude_connected {
+        db::ChatBackend::Claude
+    } else {
+        db::ChatBackend::Nest
+    };
+    let prepared = {
+        let mut conn = state.db.lock();
+        db::bind_backend_and_insert_user_message(&mut conn, &session_id, requested_backend, &query)?
+    };
+    let session = prepared.session;
+
     let prior = {
         let conn = state.db.lock();
         let mut msgs = db::list_messages(&conn, &session_id)?;
@@ -225,23 +231,24 @@ pub async fn chat_send(
 
     crate::nest_debug!(
         "chat",
-        "chat_send session={session_id} query_len={} focus={:?}",
+        "chat_send session={session_id} backend={:?} query_len={} focus={:?}",
+        session.backend,
         query.len(),
         focus
     );
 
-    let result = match agent::run_agent_chat(agent::AgentChatRequest {
+    let result = match chat_runtime::run_chat(chat_runtime::ChatRunRequest {
         app: app.clone(),
         state: state.inner().clone(),
         app_data_dir,
         settings: settings.clone(),
-        session_id: session_id.clone(),
+        session: session.clone(),
         query: query.clone(),
         focus_paths: focus,
-        stream_event: stream_event.clone(),
         prior_history: prior,
         mode: mode.clone(),
         protected_paths: protected_paths.unwrap_or_default(),
+        stream_event: stream_event.clone(),
     })
     .await
     {
@@ -270,7 +277,8 @@ pub async fn chat_send(
 
     crate::nest_debug!(
         "chat",
-        "chat_send ok answer_len={} citations={} thinking={}",
+        "chat_send ok backend={:?} answer_len={} citations={} thinking={}",
+        result.backend,
         result.answer.len(),
         result.citations.len(),
         result.thinking.is_some()
@@ -301,29 +309,30 @@ pub async fn chat_send(
         },
     );
 
-    // Best-effort title naming — do not block returning the assistant message.
-    let state_clone = state.inner().clone();
-    let sid = session_id.clone();
-    let settings_for_title = settings.clone();
-    let app_for_title = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let updated = crate::title::maybe_auto_title_after_reply(
-            &settings_for_title,
-            &sid,
-            || {
-                let conn = state_clone.db.lock();
-                crate::title::load_session_turns(&conn, &sid)
-            },
-            |title| {
-                let conn = state_clone.db.lock();
-                db::set_session_title_llm(&conn, &sid, title)
-            },
-        )
-        .await;
-        if let Some(session) = updated {
-            let _ = app_for_title.emit("chat-session-updated", session);
-        }
-    });
+    if session.backend == Some(db::ChatBackend::Nest) {
+        let state_clone = state.inner().clone();
+        let sid = session_id.clone();
+        let settings_for_title = settings.clone();
+        let app_for_title = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let updated = crate::title::maybe_auto_title_after_reply(
+                &settings_for_title,
+                &sid,
+                || {
+                    let conn = state_clone.db.lock();
+                    crate::title::load_session_turns(&conn, &sid)
+                },
+                |title| {
+                    let conn = state_clone.db.lock();
+                    db::set_session_title_llm(&conn, &sid, title)
+                },
+            )
+            .await;
+            if let Some(session) = updated {
+                let _ = app_for_title.emit("chat-session-updated", session);
+            }
+        });
+    }
 
     Ok(message)
 }

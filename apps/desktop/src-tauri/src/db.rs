@@ -1297,6 +1297,23 @@ pub fn set_session_backend_status(
         .ok_or_else(|| crate::error::AppError::msg(format!("Session not found: {session_id}")))
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClaudeConnectionReport {
+    pub connected: bool,
+    pub configured_cli_path: String,
+    pub resolved_cli_path: String,
+    pub cli_version: String,
+    pub effective_model: String,
+    pub tested_at: String,
+    pub message: Option<String>,
+}
+
+impl ClaudeConnectionReport {
+    pub fn is_connected(&self, current_cli_path: &str) -> bool {
+        self.connected && self.configured_cli_path == current_cli_path.trim()
+    }
+}
+
 #[allow(dead_code)]
 pub fn normalize_claude_custom_models(input: &str) -> String {
     let mut seen = std::collections::HashSet::new();
