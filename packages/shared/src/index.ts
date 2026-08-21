@@ -425,6 +425,29 @@ export type GeneralSettingsUpdate = Omit<
   "claude_agent_enabled" | "claude_cli_path" | "claude_custom_models"
 >;
 
+export type ClaudeConnectionReport = {
+  connected: boolean;
+  configured_cli_path: string;
+  resolved_cli_path: string;
+  cli_version: string;
+  effective_model: string;
+  tested_at: string;
+  message: string | null;
+};
+
+export type ClaudeSettingsRequest = {
+  enabled: boolean;
+  cliPath: string;
+  customModels: string;
+};
+
+export type ClaudeDetectionDto = {
+  configured_path: string;
+  resolved_path: string;
+  spawn_strategy: string;
+  cli_version: string | null;
+};
+
 export type Citation = {
   chunk_id: string;
   file_path: string;

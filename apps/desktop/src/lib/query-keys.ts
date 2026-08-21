@@ -8,6 +8,7 @@ export const queryKeys = {
   installedPacks: ["installed-packs"] as const,
   catalog: ["packs"] as const,
   hubStatus: ["hub-status"] as const,
+  claudeConnection: ["claude-connection"] as const,
   hubAuth: ["hub-auth"] as const,
   publishReconcile: ["publish-reconcile"] as const,
   messages: ["hub-messages"] as const,

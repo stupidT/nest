@@ -98,6 +98,37 @@ const messages: Record<Locale, MessageTree> = {
       couldNotSave: "Could not save settings",
       couldNotOpenFolder: "Could not open folder picker",
       couldNotTestHub: "Could not test Hub",
+      claude: {
+        group: "Claude Agent",
+        groupDescription:
+          "Route chat through your local Claude CLI. Ask and Agent modes behave identically on Claude; knowledge tools arrive in Step 2.",
+        enabled: "Enable Claude Agent",
+        enabledDescription:
+          "When enabled and connected, new chats bind to Claude on their first message. Existing chats keep their backend.",
+        cliPath: "CLI path",
+        cliPathDescription:
+          "Leave empty to auto-detect. Accepts claude.exe, the npm cli-wrapper.cjs, or a claude shim.",
+        autoDetect: "Auto-detect",
+        detecting: "Detecting…",
+        testConnection: "Test connection",
+        saveAndConnect: "Save and connect",
+        save: "Save",
+        saving: "Saving…",
+        notSaved: "Tested, not saved",
+        stale: "Settings changed since the last test",
+        statusConnected: "Connected",
+        statusDisconnected: "Not connected",
+        resolvedPath: "Resolved CLI",
+        cliVersion: "CLI version",
+        effectiveModel: "Effective model",
+        testedAt: "Tested at",
+        customModels: "Custom models",
+        customModelsDescription:
+          "One model ID per line. Used by the agent/model selector planned for Step 2.",
+        couldNotDetect: "Could not detect Claude CLI",
+        couldNotTest: "Could not test Claude connection",
+        couldNotSave: "Could not save Claude settings",
+      },
     },
     account: {
       title: "Account",

@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
   AppSettings,
+  ClaudeConnectionReport,
   GeneralSettingsUpdate,
   HubConnectionStatus,
   VaultChangeMode,
@@ -16,6 +17,7 @@ import {
   LoaderCircle,
   Network,
   Palette,
+  Sparkles,
   XCircle,
   type LucideIcon,
 } from "lucide-react";
@@ -36,6 +38,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PanelHeader } from "@/components/ui/panel-header";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import {
   Tooltip,
@@ -251,6 +254,103 @@ export function SettingsPanel() {
 
     return () => window.clearTimeout(timer);
   }, [form, queryClient, t]);
+
+  const [claudeDraft, setClaudeDraft] = useState({
+    enabled: false,
+    cliPath: "",
+    customModels: "",
+  });
+  const [claudeHydrated, setClaudeHydrated] = useState(false);
+  const [claudeTestResult, setClaudeTestResult] =
+    useState<ClaudeConnectionReport | null>(null);
+  const [claudeStale, setClaudeStale] = useState(false);
+
+  useEffect(() => {
+    if (!settingsQuery.data || claudeHydrated) return;
+    setClaudeDraft({
+      enabled: settingsQuery.data.claude_agent_enabled,
+      cliPath: settingsQuery.data.claude_cli_path,
+      customModels: settingsQuery.data.claude_custom_models,
+    });
+    setClaudeHydrated(true);
+  }, [settingsQuery.data, claudeHydrated]);
+
+  const claudeConnectionQuery = useQuery({
+    queryKey: queryKeys.claudeConnection,
+    queryFn: api.claudeConnectionStatus,
+  });
+
+  const claudeDirty =
+    claudeHydrated &&
+    (claudeDraft.enabled !== (settingsQuery.data?.claude_agent_enabled ?? false) ||
+      claudeDraft.cliPath !== (settingsQuery.data?.claude_cli_path ?? "") ||
+      claudeDraft.customModels !==
+        (settingsQuery.data?.claude_custom_models ?? ""));
+
+  const markClaudeDirty = () => setClaudeStale(true);
+
+  const claudeDetect = useMutation({
+    mutationFn: () =>
+      api.claudeDetectCli(
+        claudeDraft.cliPath.trim() || undefined,
+      ),
+    onSuccess: (detection) => {
+      setClaudeDraft((prev) => ({ ...prev, cliPath: detection.resolved_path }));
+      markClaudeDirty();
+    },
+    onError: (e: unknown) => {
+      toast.error(t("settings.claude.couldNotDetect"), {
+        description: e instanceof Error ? e.message : String(e),
+      });
+    },
+  });
+
+  const claudeTest = useMutation({
+    mutationFn: () => api.claudeTestConnection(claudeDraft.cliPath),
+    onSuccess: (report) => setClaudeTestResult(report),
+    onError: (e: unknown) => {
+      toast.error(t("settings.claude.couldNotTest"), {
+        description: e instanceof Error ? e.message : String(e),
+      });
+    },
+  });
+
+  const claudeSave = useMutation({
+    mutationFn: () =>
+      api.claudeSaveSettings({
+        enabled: claudeDraft.enabled,
+        cliPath: claudeDraft.cliPath,
+        customModels: claudeDraft.customModels,
+      }),
+    onSuccess: (report) => {
+      setClaudeTestResult(null);
+      setClaudeStale(false);
+      void queryClient.invalidateQueries({ queryKey: queryKeys.settings });
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.claudeConnection,
+      });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.chatSessions });
+      if (report.connected) {
+        toast.success(t("settings.claude.statusConnected"));
+      } else if (report.message) {
+        toast.error(t("settings.claude.statusDisconnected"), {
+          description: report.message,
+        });
+      }
+    },
+    onError: (e: unknown) => {
+      toast.error(t("settings.claude.couldNotSave"), {
+        description: e instanceof Error ? e.message : String(e),
+      });
+    },
+  });
+
+  const claudeStatus: ClaudeConnectionReport | null = claudeTestResult
+    ?? (claudeStale
+      ? null
+      : claudeConnectionQuery.data && claudeConnectionQuery.data.configured_cli_path === claudeDraft.cliPath.trim()
+        ? claudeConnectionQuery.data
+        : null);
 
   const update = <K extends keyof AppSettings>(
     key: K,
@@ -612,6 +712,175 @@ export function SettingsPanel() {
                       value={form.chat_model}
                       onChange={(e) => update("chat_model", e.target.value)}
                       placeholder="openai/gpt-4o-mini"
+                    />
+                  </Field>
+                </GeneralGroup>
+                <GeneralGroup
+                  icon={Sparkles}
+                  title={t("settings.claude.group")}
+                  help={<p>{t("settings.claude.groupDescription")}</p>}
+                >
+                  <div className="flex items-start justify-between gap-4 rounded-lg bg-muted/40 px-3 py-3">
+                    <div className="min-w-0 space-y-1">
+                      <Label
+                        htmlFor="claude-enabled"
+                        className="text-sm font-medium"
+                      >
+                        {t("settings.claude.enabled")}
+                      </Label>
+                      <p className="text-xs text-muted-foreground">
+                        {t("settings.claude.enabledDescription")}
+                      </p>
+                    </div>
+                    <Switch
+                      id="claude-enabled"
+                      checked={claudeDraft.enabled}
+                      onCheckedChange={(checked) => {
+                        setClaudeDraft((prev) => ({
+                          ...prev,
+                          enabled: checked,
+                        }));
+                        markClaudeDirty();
+                      }}
+                      aria-label={t("settings.claude.enabled")}
+                    />
+                  </div>
+                  <Field
+                    label={t("settings.claude.cliPath")}
+                    description={t("settings.claude.cliPathDescription")}
+                  >
+                    <div className="flex min-w-0 gap-2">
+                      <Input
+                        value={claudeDraft.cliPath}
+                        onChange={(e) => {
+                          setClaudeDraft((prev) => ({
+                            ...prev,
+                            cliPath: e.target.value,
+                          }));
+                          markClaudeDirty();
+                        }}
+                        placeholder="claude.exe · cli-wrapper.cjs · empty = auto-detect"
+                        className="min-w-0 flex-1 font-mono text-xs"
+                      />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="shrink-0"
+                        disabled={claudeDetect.isPending}
+                        onClick={() => claudeDetect.mutate()}
+                      >
+                        {claudeDetect.isPending && (
+                          <LoaderCircle className="size-4 animate-spin" />
+                        )}
+                        {claudeDetect.isPending
+                          ? t("settings.claude.detecting")
+                          : t("settings.claude.autoDetect")}
+                      </Button>
+                    </div>
+                  </Field>
+                  <Field
+                    label={t("settings.claude.testConnection")}
+                    description={
+                      claudeDraft.enabled
+                        ? t("settings.claude.saveAndConnect")
+                        : t("settings.claude.save")
+                    }
+                  >
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        disabled={claudeTest.isPending}
+                        onClick={() => claudeTest.mutate()}
+                      >
+                        {claudeTest.isPending && (
+                          <LoaderCircle className="size-3.5 animate-spin" />
+                        )}
+                        {claudeTest.isPending
+                          ? t("settings.testing")
+                          : t("settings.claude.testConnection")}
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        disabled={claudeSave.isPending}
+                        onClick={() => claudeSave.mutate()}
+                      >
+                        {claudeSave.isPending && (
+                          <LoaderCircle className="size-3.5 animate-spin" />
+                        )}
+                        {claudeSave.isPending
+                          ? t("settings.claude.saving")
+                          : claudeDraft.enabled
+                            ? t("settings.claude.saveAndConnect")
+                            : t("settings.claude.save")}
+                      </Button>
+                    </div>
+                    {claudeDirty && (
+                      <p className="text-xs text-muted-foreground">
+                        {t("settings.claude.notSaved")}
+                      </p>
+                    )}
+                    {claudeTestResult && (
+                      <div className="space-y-1 rounded-md border bg-muted/30 px-3 py-2">
+                        <p
+                          className={
+                            claudeTestResult.connected
+                              ? "flex items-center gap-1.5 text-xs text-primary"
+                              : "flex items-center gap-1.5 text-xs text-destructive"
+                          }
+                        >
+                          {claudeTestResult.connected ? (
+                            <CheckCircle2 className="size-3.5 shrink-0" />
+                          ) : (
+                            <XCircle className="size-3.5 shrink-0" />
+                          )}
+                          {claudeTestResult.connected
+                            ? t("settings.claude.statusConnected")
+                            : (claudeTestResult.message ??
+                              t("settings.claude.statusDisconnected"))}
+                        </p>
+                        {claudeTestResult.connected && (
+                          <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
+                            <dt>{t("settings.claude.resolvedPath")}</dt>
+                            <dd className="truncate font-mono">
+                              {claudeTestResult.resolved_cli_path}
+                            </dd>
+                            <dt>{t("settings.claude.cliVersion")}</dt>
+                            <dd className="font-mono">
+                              {claudeTestResult.cli_version}
+                            </dd>
+                            <dt>{t("settings.claude.effectiveModel")}</dt>
+                            <dd className="font-mono">
+                              {claudeTestResult.effective_model}
+                            </dd>
+                          </dl>
+                        )}
+                      </div>
+                    )}
+                    {claudeStatus?.connected && claudeStale && (
+                      <p className="text-xs text-muted-foreground">
+                        {t("settings.claude.stale")}
+                      </p>
+                    )}
+                  </Field>
+                  <Field
+                    label={t("settings.claude.customModels")}
+                    description={t("settings.claude.customModelsDescription")}
+                  >
+                    <Textarea
+                      rows={4}
+                      value={claudeDraft.customModels}
+                      onChange={(e) => {
+                        setClaudeDraft((prev) => ({
+                          ...prev,
+                          customModels: e.target.value,
+                        }));
+                        markClaudeDirty();
+                      }}
+                      placeholder={"glm-5.3\nclaude-sonnet-4-5"}
+                      className="font-mono text-xs"
                     />
                   </Field>
                 </GeneralGroup>

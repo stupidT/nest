@@ -6,6 +6,9 @@ import type {
   ChatFileChangeDetail,
   ChatMode,
   ChatSession,
+  ClaudeConnectionReport,
+  ClaudeDetectionDto,
+  ClaudeSettingsRequest,
   DiffPair,
   FileStatus,
   GeneralSettingsUpdate,
@@ -106,6 +109,14 @@ export const api = {
     }),
   settingsSet: (settings: GeneralSettingsUpdate) =>
     invoke<void>("settings_set", { settings }),
+  claudeDetectCli: (cliPath?: string) =>
+    invoke<ClaudeDetectionDto>("claude_detect_cli", { cliPath }),
+  claudeTestConnection: (cliPath: string) =>
+    invoke<ClaudeConnectionReport>("claude_test_connection", { cliPath }),
+  claudeSaveSettings: (request: ClaudeSettingsRequest) =>
+    invoke<ClaudeConnectionReport>("claude_save_settings", { request }),
+  claudeConnectionStatus: () =>
+    invoke<ClaudeConnectionReport>("claude_connection_status"),
 
   indexStatus: () => invoke<IndexStatus>("index_status"),
   indexRebuild: () => invoke<IndexStatus>("index_rebuild"),
