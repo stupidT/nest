@@ -3,42 +3,73 @@
 Guidance for AI coding agents (opencode, Cursor, Claude Code, etc.) working on this
 local clone of `cyborgoat/nest`. Read this before making changes.
 
+## Remote configuration
+
+| Remote | URL | Purpose |
+|--------|-----|---------|
+| `upstream` | `git@github.com:cyborgoat/nest.git` | Public main repo. **Fetch only, never push.** |
+| `origin` | `git@github.com:stupidT/nest.git` | Personal fork. Push here for backup and PR source. |
+
+SSH key: `~/.ssh/id_ed25519_github` (via `~/.ssh/config` Host `github.com`).
+
+Fork default branch is set to `personal/dev` on GitHub to suppress unwanted
+"Compare & pull request" banners for routine pushes.
+
 ## Branching strategy (authoritative)
 
 This clone uses a **two-tier branch model** to keep upstream PRs clean while allowing
 local experimentation, intermediate design docs, and agent-constraint notes.
 
 ```
-upstream/main  ──(fetch/sync)──>  personal/dev  ──(cut)──>  feat/xxx
-                                                                   │
-                          feat/xxx-clean  <──  cherry-pick final ──┘
-                                │
-                            PR → upstream/main
+upstream/main ──(fetch/reset)──>  main  ──(rebase)──>  personal/dev  ──(cut)──>  feat/xxx
+                                                                                        │
+                                    feat/xxx-clean  <──  cherry-pick final ────────────┘
+                                          │
+                                  push to origin (fork)
+                                          │
+                                      PR → upstream/main
 ```
 
 ### Branches
 
 | Branch | Lifetime | Purpose | Pushed? |
 |--------|----------|---------|---------|
-| `main` | permanent | Tracks `upstream/main`. Never commit here. Sync only (`git fetch upstream && git reset --hard upstream/main`). | fetch/pull only |
-| `personal/dev` | permanent, local | Working trunk for this developer. Holds agent constraints, intermediate design docs, experimental code, WIP commits. Rebase onto `main` periodically. | **local only** |
+| `main` | permanent | Mirrors `upstream/main`. **Never commit here.** Sync only via `git fetch upstream && git reset --hard upstream/main`. | fetch only, never push |
+| `personal/dev` | permanent | Working trunk for this developer. Holds agent constraints, intermediate design docs, experimental code, WIP commits. Rebase onto `main` after each upstream sync. | push to `origin` (fork) for backup |
 | `feat/xxx` | short-lived | Feature work cut from `personal/dev`. May contain messy history. | optional, local |
-| `feat/xxx-clean` | short-lived | Clean branch for the upstream PR. Built by cherry-picking or interactive-rebasing only the **final** commits from `feat/xxx`. | pushed to fork, PR target |
+| `feat/xxx-clean` | short-lived | Clean branch for the upstream PR. Built by cherry-picking or interactive-rebasing only the **final** commits from `feat/xxx`. | push to `origin` (fork), PR target |
 
 ### Rules
 
-1. **Never commit to `main`.** It mirrors upstream.
-2. **Never open a PR from `personal/dev`.** It contains intermediate state.
-3. **PRs come from `feat/xxx-clean` branches only**, containing solely:
+1. **Never commit to `main`.** It mirrors upstream. Sync only.
+2. **Never push to `upstream`.** It is the public repo. All pushes go to `origin` (fork).
+3. **Never open a PR from `personal/dev`.** It contains intermediate state.
+4. **PRs come from `feat/xxx-clean` branches only**, containing solely:
    - final production code
    - final user-facing docs (under `docs/` or root)
    - tests
-4. **Intermediate artifacts stay on `personal/dev`** and never reach clean branches:
+5. **Intermediate artifacts stay on `personal/dev`** and never reach clean branches:
    - design drafts, exploration notes (put under `docs/_wip/`)
    - agent constraints, prompt experiments (this file and siblings)
    - scratch scripts, throwaway spikes
-5. **Before opening a PR**, rebase `feat/xxx-clean` onto latest `upstream/main`
+6. **Before opening a PR**, rebase `feat/xxx-clean` onto latest `upstream/main`
    and run all sanity checks below.
+
+### Daily workflow
+
+```powershell
+# --- Sync upstream changes ---
+git checkout main
+git fetch upstream
+git reset --hard upstream/main
+
+# --- Rebase personal work onto latest main ---
+git checkout personal/dev
+git rebase main
+
+# --- Push backup to fork ---
+git push origin personal/dev
+```
 
 ### Suggested flow for a new feature
 
@@ -46,13 +77,16 @@ upstream/main  ──(fetch/sync)──>  personal/dev  ──(cut)──>  feat
 # from personal/dev, up to date with main
 git checkout -b feat/my-feature
 # ... work, commit freely (messy history ok) ...
+
 # when ready to PR:
 git checkout main
-git fetch upstream            # or origin if upstream not configured
+git fetch upstream
 git reset --hard upstream/main
 git checkout -b feat/my-feature-clean
 git cherry-pick <final-commit-sha-1> <final-commit-sha-2>
 # run sanity checks (see below), then push to fork and open PR
+git push origin feat/my-feature-clean
+# open PR on GitHub: feat/my-feature-clean → cyborgoat/nest:main
 ```
 
 ## Repository layout
