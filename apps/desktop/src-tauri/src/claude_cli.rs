@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 
 pub const ERR_INVALID_CLI_PATH: &str = "invalid_cli_path";
 pub const ERR_NODE_NOT_FOUND: &str = "node_not_found";
+pub const ERR_CLAUDE_PROTOCOL: &str = "claude_protocol_error";
+pub const ERR_CLAUDE_SESSION_MISMATCH: &str = "claude_session_mismatch";
 
 /// How the resolved Claude CLI must be spawned.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -317,6 +319,289 @@ fn wrapper_relative() -> PathBuf {
         .join("@anthropic-ai")
         .join("claude-code")
         .join("cli-wrapper.cjs")
+}
+
+/// A UI-visible streaming event emitted while parsing Claude NDJSON output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParserEvent {
+    Token(String),
+    Thinking(String),
+}
+
+/// The terminal state of one Claude turn, derived from the `result` message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TurnOutcome {
+    Success {
+        answer: String,
+        thinking: String,
+        cli_session_id: String,
+        model: Option<String>,
+        cli_version: Option<String>,
+    },
+    Failed {
+        code: &'static str,
+        message: String,
+    },
+}
+
+/// Incremental parser for Claude CLI `--output-format stream-json` lines.
+///
+/// Enforces the session-ID contract, deduplicates partial deltas against the
+/// final assistant/result text, and tolerates unknown event types. The
+/// `result` message is the only success terminal state.
+pub struct StreamParser {
+    expected_session_id: String,
+    state: ParserState,
+}
+
+#[derive(Default)]
+struct ParserState {
+    model: Option<String>,
+    cli_version: Option<String>,
+    cli_session_id: Option<String>,
+    streamed_text: String,
+    streamed_thinking: String,
+    assistant_text: Option<String>,
+    assistant_thinking: Option<String>,
+    result: Option<ParsedResultMessage>,
+}
+
+#[derive(Debug, Clone)]
+struct ParsedResultMessage {
+    subtype: String,
+    session_id: String,
+    is_error: bool,
+    text: Option<String>,
+}
+
+fn preview(text: &str) -> String {
+    let mut shown: String = text.chars().take(80).collect();
+    if shown.len() < text.len() {
+        shown.push('…');
+    }
+    shown
+}
+
+/// Chooses the final text per the Step 1 dedup rules: with deltas streamed,
+/// prefer the most complete candidate that has the streamed text as a prefix;
+/// without deltas, prefer the result text, then the assistant candidate.
+fn pick_final(streamed: &str, candidates: &[Option<&String>]) -> String {
+    if streamed.is_empty() {
+        for candidate in candidates.iter().flatten() {
+            if !candidate.is_empty() {
+                return (*candidate).clone();
+            }
+        }
+        return String::new();
+    }
+    let mut best: Option<&String> = None;
+    for candidate in candidates.iter().flatten() {
+        let compatible = candidate.starts_with(streamed) || candidate.as_str() == streamed;
+        if compatible && best.is_none_or(|current| candidate.len() > current.len()) {
+            best = Some(candidate);
+        }
+    }
+    best.map(String::from)
+        .unwrap_or_else(|| streamed.to_string())
+}
+
+impl StreamParser {
+    pub fn new(expected_session_id: &str) -> Self {
+        Self {
+            expected_session_id: expected_session_id.to_string(),
+            state: ParserState::default(),
+        }
+    }
+
+    /// Ingests one stdout line. Returns UI events to forward, or an error
+    /// for protocol violations (non-JSON line, session mismatch).
+    pub fn ingest_line(&mut self, line: &str) -> AppResult<Option<ParserEvent>> {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+        let value: serde_json::Value = serde_json::from_str(trimmed).map_err(|_| {
+            AppError::msg(format!(
+                "{ERR_CLAUDE_PROTOCOL}: non-JSON output line: {}",
+                preview(trimmed)
+            ))
+        })?;
+        let kind = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        match kind {
+            "system" => self.handle_system(&value),
+            "stream_event" => self.handle_stream_event(&value),
+            "assistant" => {
+                self.handle_assistant(&value);
+                Ok(None)
+            }
+            "result" => {
+                self.handle_result(&value)?;
+                Ok(None)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn handle_system(&mut self, value: &serde_json::Value) -> AppResult<Option<ParserEvent>> {
+        if value.get("subtype").and_then(|v| v.as_str()) != Some("init") {
+            return Ok(None);
+        }
+        let session_id = value
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        if session_id != self.expected_session_id {
+            return Err(AppError::msg(format!(
+                "{ERR_CLAUDE_SESSION_MISMATCH}: init session {session_id} does not match {}",
+                self.expected_session_id
+            )));
+        }
+        self.state.cli_session_id = Some(session_id);
+        self.state.model = value
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        self.state.cli_version = value
+            .get("claude_code_version")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        Ok(None)
+    }
+
+    fn handle_stream_event(&mut self, value: &serde_json::Value) -> AppResult<Option<ParserEvent>> {
+        let event = match value.get("event") {
+            Some(event) => event,
+            None => return Ok(None),
+        };
+        if event.get("type").and_then(|v| v.as_str()) != Some("content_block_delta") {
+            return Ok(None);
+        }
+        let delta = match event.get("delta") {
+            Some(delta) => delta,
+            None => return Ok(None),
+        };
+        match delta.get("type").and_then(|v| v.as_str()) {
+            Some("text_delta") => {
+                let text = delta
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                if text.is_empty() {
+                    return Ok(None);
+                }
+                self.state.streamed_text.push_str(text);
+                Ok(Some(ParserEvent::Token(text.to_string())))
+            }
+            Some("thinking_delta") => {
+                let thinking = delta
+                    .get("thinking")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                if thinking.is_empty() {
+                    return Ok(None);
+                }
+                self.state.streamed_thinking.push_str(thinking);
+                Ok(Some(ParserEvent::Thinking(thinking.to_string())))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn handle_assistant(&mut self, value: &serde_json::Value) {
+        let Some(content) = value
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_array())
+        else {
+            return;
+        };
+        let mut text = String::new();
+        let mut thinking = String::new();
+        for block in content {
+            match block.get("type").and_then(|v| v.as_str()) {
+                Some("text") => {
+                    if let Some(chunk) = block.get("text").and_then(|v| v.as_str()) {
+                        text.push_str(chunk);
+                    }
+                }
+                Some("thinking") => {
+                    if let Some(chunk) = block.get("thinking").and_then(|v| v.as_str()) {
+                        thinking.push_str(chunk);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !text.is_empty() {
+            self.state.assistant_text = Some(text);
+        }
+        if !thinking.is_empty() {
+            self.state.assistant_thinking = Some(thinking);
+        }
+    }
+
+    fn handle_result(&mut self, value: &serde_json::Value) -> AppResult<()> {
+        let session_id = value
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        if !session_id.is_empty() && session_id != self.expected_session_id {
+            return Err(AppError::msg(format!(
+                "{ERR_CLAUDE_SESSION_MISMATCH}: result session {session_id} does not match {}",
+                self.expected_session_id
+            )));
+        }
+        self.state.result = Some(ParsedResultMessage {
+            subtype: value
+                .get("subtype")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            session_id,
+            is_error: value
+                .get("is_error")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            text: value
+                .get("result")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+        });
+        Ok(())
+    }
+
+    /// Finalizes the turn after the process exited with `exit_ok`.
+    /// `exit_ok = true` without a `result` message is a protocol error.
+    pub fn finish(&mut self, exit_ok: bool) -> AppResult<TurnOutcome> {
+        let Some(result) = self.state.result.clone() else {
+            return Err(AppError::msg(format!(
+                "{ERR_CLAUDE_PROTOCOL}: CLI exited without a result message (exit_ok={exit_ok})"
+            )));
+        };
+        if result.is_error || result.subtype != "success" {
+            return Ok(TurnOutcome::Failed {
+                code: ERR_CLAUDE_PROTOCOL,
+                message: format!("result subtype: {}", result.subtype),
+            });
+        }
+        let answer = pick_final(
+            &self.state.streamed_text,
+            &[result.text.as_ref(), self.state.assistant_text.as_ref()],
+        );
+        let thinking = pick_final(
+            &self.state.streamed_thinking,
+            &[self.state.assistant_thinking.as_ref()],
+        );
+        Ok(TurnOutcome::Success {
+            answer,
+            thinking,
+            cli_session_id: result.session_id,
+            model: self.state.model.clone(),
+            cli_version: self.state.cli_version.clone(),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -631,5 +916,276 @@ mod resolver_tests {
     fn auto_detection_failure_is_invalid_path() {
         let err = find_auto_candidate(&[], &[], "").unwrap_err();
         assert!(err.to_string().contains(ERR_INVALID_CLI_PATH));
+    }
+}
+
+#[cfg(test)]
+mod parser_tests {
+    use super::*;
+
+    const SESSION: &str = "11111111-2222-4333-8444-555555555555";
+
+    fn init_line() -> String {
+        format!(
+            r#"{{"type":"system","subtype":"init","session_id":"{SESSION}","model":"glm-5.3[1m]","claude_code_version":"2.1.238"}}"#
+        )
+    }
+
+    fn text_delta(text: &str) -> String {
+        format!(
+            r#"{{"type":"stream_event","event":{{"type":"content_block_delta","index":1,"delta":{{"type":"text_delta","text":{}}}}},"session_id":"{SESSION}"}}"#,
+            serde_json::json!(text)
+        )
+    }
+
+    fn thinking_delta(text: &str) -> String {
+        format!(
+            r#"{{"type":"stream_event","event":{{"type":"content_block_delta","index":0,"delta":{{"type":"thinking_delta","thinking":{}}}}},"session_id":"{SESSION}"}}"#,
+            serde_json::json!(text)
+        )
+    }
+
+    fn assistant_line(text: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":{}}}]}},"session_id":"{SESSION}"}}"#,
+            serde_json::json!(text)
+        )
+    }
+
+    fn result_line(subtype: &str, text: &str) -> String {
+        format!(
+            r#"{{"type":"result","subtype":"{subtype}","session_id":"{SESSION}","result":{}}}"#,
+            serde_json::json!(text)
+        )
+    }
+
+    #[test]
+    fn init_line_is_validated_and_metadata_captured() {
+        let mut parser = StreamParser::new(SESSION);
+        assert_eq!(parser.ingest_line(&init_line()).unwrap(), None);
+        let outcome = parser.finish(true).unwrap_err();
+        // No result yet: init alone is not a terminal state.
+        assert!(outcome.to_string().contains(ERR_CLAUDE_PROTOCOL));
+    }
+
+    #[test]
+    fn init_session_mismatch_is_an_error() {
+        let mut parser = StreamParser::new(SESSION);
+        let foreign = r#"{"type":"system","subtype":"init","session_id":"88888888-8888-4888-8888-888888888888","model":"m"}"#;
+        let err = parser.ingest_line(foreign).unwrap_err();
+        assert!(err.to_string().contains(ERR_CLAUDE_SESSION_MISMATCH));
+    }
+
+    #[test]
+    fn text_deltas_emit_tokens() {
+        let mut parser = StreamParser::new(SESSION);
+        parser.ingest_line(&init_line()).unwrap();
+        assert_eq!(
+            parser.ingest_line(&text_delta("hel")).unwrap(),
+            Some(ParserEvent::Token("hel".into()))
+        );
+        assert_eq!(
+            parser.ingest_line(&text_delta("lo")).unwrap(),
+            Some(ParserEvent::Token("lo".into()))
+        );
+    }
+
+    #[test]
+    fn thinking_deltas_emit_thinking_events() {
+        let mut parser = StreamParser::new(SESSION);
+        parser.ingest_line(&init_line()).unwrap();
+        assert_eq!(
+            parser
+                .ingest_line(&thinking_delta("Let me think."))
+                .unwrap(),
+            Some(ParserEvent::Thinking("Let me think.".into()))
+        );
+    }
+
+    #[test]
+    fn partial_and_final_do_not_duplicate() {
+        let mut parser = StreamParser::new(SESSION);
+        parser.ingest_line(&init_line()).unwrap();
+        parser.ingest_line(&text_delta("hello")).unwrap();
+        parser.ingest_line(&text_delta(" world")).unwrap();
+        // Assistant full message and result both carry the complete text.
+        assert_eq!(
+            parser.ingest_line(&assistant_line("hello world")).unwrap(),
+            None
+        );
+        assert_eq!(
+            parser
+                .ingest_line(&result_line("success", "hello world"))
+                .unwrap(),
+            None
+        );
+        let TurnOutcome::Success { answer, .. } = parser.finish(true).unwrap() else {
+            panic!("expected success");
+        };
+        assert_eq!(answer, "hello world");
+    }
+
+    #[test]
+    fn final_only_streams_once_at_finish() {
+        let mut parser = StreamParser::new(SESSION);
+        parser.ingest_line(&init_line()).unwrap();
+        // No partial deltas; candidates are cached silently.
+        assert_eq!(
+            parser.ingest_line(&assistant_line("hello world")).unwrap(),
+            None
+        );
+        assert_eq!(
+            parser
+                .ingest_line(&result_line("success", "hello world"))
+                .unwrap(),
+            None
+        );
+        let TurnOutcome::Success { answer, .. } = parser.finish(true).unwrap() else {
+            panic!("expected success");
+        };
+        assert_eq!(answer, "hello world");
+    }
+
+    #[test]
+    fn result_error_subtype_fails_the_turn() {
+        let mut parser = StreamParser::new(SESSION);
+        parser.ingest_line(&init_line()).unwrap();
+        let error_result = r#"{"type":"result","subtype":"error_during_execution","session_id":"SESSION","is_error":true,"result":"boom"}"#.replace("SESSION", SESSION);
+        parser.ingest_line(&error_result).unwrap();
+        let TurnOutcome::Failed { code, message } = parser.finish(true).unwrap() else {
+            panic!("expected failure");
+        };
+        assert_eq!(code, ERR_CLAUDE_PROTOCOL);
+        assert!(message.contains("error_during_execution"));
+    }
+
+    #[test]
+    fn unknown_types_and_fields_are_ignored() {
+        let mut parser = StreamParser::new(SESSION);
+        parser.ingest_line(&init_line()).unwrap();
+        assert_eq!(
+            parser
+                .ingest_line(r#"{"type":"system","subtype":"status"}"#)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            parser.ingest_line(
+                r#"{"type":"stream_event","event":{"type":"message_start"},"session_id":"11111111-2222-4333-8444-555555555555"}"#
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            parser.ingest_line(
+                r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"signature_delta","signature":"x"}},"session_id":"11111111-2222-4333-8444-555555555555"}"#
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            parser
+                .ingest_line(r#"{"type":"totally_new","field":1}"#)
+                .unwrap(),
+            None
+        );
+        parser.ingest_line(&result_line("success", "done")).unwrap();
+        let TurnOutcome::Success { answer, .. } = parser.finish(true).unwrap() else {
+            panic!("expected success");
+        };
+        assert_eq!(answer, "done");
+    }
+
+    #[test]
+    fn non_json_line_is_a_protocol_error() {
+        let mut parser = StreamParser::new(SESSION);
+        let err = parser.ingest_line("this is not json").unwrap_err();
+        assert!(err.to_string().contains(ERR_CLAUDE_PROTOCOL));
+        // The error message carries a truncated preview.
+        assert!(err.to_string().contains("this is not"));
+    }
+
+    #[test]
+    fn exit_ok_without_result_is_a_protocol_error() {
+        let mut parser = StreamParser::new(SESSION);
+        parser.ingest_line(&init_line()).unwrap();
+        parser.ingest_line(&text_delta("partial")).unwrap();
+        let err = parser.finish(true).unwrap_err();
+        assert!(err.to_string().contains(ERR_CLAUDE_PROTOCOL));
+    }
+
+    #[test]
+    fn non_zero_exit_without_result_reports_missing_result() {
+        let mut parser = StreamParser::new(SESSION);
+        parser.ingest_line(&init_line()).unwrap();
+        let err = parser.finish(false).unwrap_err();
+        assert!(err.to_string().contains(ERR_CLAUDE_PROTOCOL));
+    }
+
+    #[test]
+    fn result_session_mismatch_is_an_error() {
+        let mut parser = StreamParser::new(SESSION);
+        parser.ingest_line(&init_line()).unwrap();
+        let foreign =
+            result_line("success", "hi").replace(SESSION, "88888888-8888-4888-8888-888888888888");
+        let err = parser.ingest_line(&foreign).unwrap_err();
+        assert!(err.to_string().contains(ERR_CLAUDE_SESSION_MISMATCH));
+    }
+
+    #[test]
+    fn success_outcome_carries_metadata() {
+        let mut parser = StreamParser::new(SESSION);
+        parser.ingest_line(&init_line()).unwrap();
+        parser.ingest_line(&thinking_delta("hmm")).unwrap();
+        parser.ingest_line(&text_delta("hi")).unwrap();
+        parser.ingest_line(&result_line("success", "hi")).unwrap();
+        let TurnOutcome::Success {
+            answer,
+            thinking,
+            cli_session_id,
+            model,
+            cli_version,
+        } = parser.finish(true).unwrap()
+        else {
+            panic!("expected success");
+        };
+        assert_eq!(answer, "hi");
+        assert_eq!(thinking, "hmm");
+        assert_eq!(cli_session_id, SESSION);
+        assert_eq!(model.as_deref(), Some("glm-5.3[1m]"));
+        assert_eq!(cli_version.as_deref(), Some("2.1.238"));
+    }
+
+    #[test]
+    fn streamed_text_wins_when_candidates_conflict() {
+        let mut parser = StreamParser::new(SESSION);
+        parser.ingest_line(&init_line()).unwrap();
+        parser.ingest_line(&text_delta("streamed")).unwrap();
+        // Both final candidates disagree with the stream.
+        parser.ingest_line(&assistant_line("different")).unwrap();
+        parser
+            .ingest_line(&result_line("success", "different"))
+            .unwrap();
+        let TurnOutcome::Success { answer, .. } = parser.finish(true).unwrap() else {
+            panic!("expected success");
+        };
+        assert_eq!(answer, "streamed");
+    }
+
+    #[test]
+    fn thinking_from_assistant_blocks_is_used_without_deltas() {
+        let mut parser = StreamParser::new(SESSION);
+        parser.ingest_line(&init_line()).unwrap();
+        let assistant = format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"thinking","thinking":"deep"}}]}},"session_id":"{SESSION}"}}"#
+        );
+        parser.ingest_line(&assistant).unwrap();
+        parser
+            .ingest_line(&result_line("success", "answer"))
+            .unwrap();
+        let TurnOutcome::Success { thinking, .. } = parser.finish(true).unwrap() else {
+            panic!("expected success");
+        };
+        assert_eq!(thinking, "deep");
     }
 }
