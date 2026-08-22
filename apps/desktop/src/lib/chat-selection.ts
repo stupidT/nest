@@ -27,13 +27,23 @@ export const NEST_LABEL = "Nest Agent";
 export const CLAUDE_LABEL = "Claude";
 
 export function deriveCapsules(params: {
+  activeBackendId: ChatBackend | "nest" | "claude";
   boundBackend: ChatBackend | null;
   claudeEnabled: boolean;
   claudeStatus: ClaudeConnectionStatus | null;
   claudeModelIds: string[];
+  claudeDefaultModelLabel: string | null;
   nestModelLabel: string | null;
 }): SelectionCapsules {
-  const { boundBackend, claudeEnabled, claudeStatus, claudeModelIds } = params;
+  const {
+    activeBackendId,
+    boundBackend,
+    claudeEnabled,
+    claudeStatus,
+    claudeModelIds,
+    claudeDefaultModelLabel,
+    nestModelLabel,
+  } = params;
 
   const claudeUsable =
     claudeEnabled && (claudeStatus === "connected" || claudeStatus === "last_connected");
@@ -52,14 +62,16 @@ export function deriveCapsules(params: {
     });
   }
 
-  const activeBackend = boundBackend ?? (claudeUsable ? "claude" : "nest");
   const models: ModelOption[] =
-    activeBackend === "claude"
+    activeBackendId === "claude"
       ? [
-          { id: "default", label: "CLI Default" },
+          {
+            id: "default",
+            label: claudeDefaultModelLabel ?? "CLI Default",
+          },
           ...claudeModelIds.map((id) => ({ id, label: id })),
         ]
-      : [{ id: "default", label: params.nestModelLabel ?? "Default (API)" }];
+      : [{ id: "default", label: nestModelLabel ?? "Default (API)" }];
 
   return {
     backends,

@@ -178,16 +178,19 @@ export function ChatPanel() {
     .map((option) => option.model_id)
     .filter((model) => model.trim() !== "");
 
+  const activeBackendId: string =
+    currentSession?.backend ?? currentSession?.selected_backend_id ?? "nest";
+
   const capsules = deriveCapsules({
+    activeBackendId: activeBackendId as "nest" | "claude",
     boundBackend: currentSession?.backend ?? null,
     claudeEnabled,
     claudeStatus,
     claudeModelIds,
+    claudeDefaultModelLabel:
+      claudeConnectionQuery.data?.effective_model?.trim() || null,
     nestModelLabel: settingsQuery.data?.chat_model?.trim() || null,
   });
-
-  const activeBackendId: string =
-    currentSession?.backend ?? currentSession?.selected_backend_id ?? "nest";
   const activeModelId = capsuleFromModelSelection(
     currentSession?.selected_model ?? { kind: "default", value: null },
   );
@@ -275,14 +278,22 @@ export function ChatPanel() {
     if (backendId === activeBackendId) return;
     if (currentSession?.backend != null) {
       applySelection(
-        { backendId },
+        {
+          backendId,
+          modelKind: "default",
+          modelValue: null,
+        },
         composerDraftRef.current
           ? { text: composerDraftRef.current.text, refs: composerDraftRef.current.refs }
           : null,
       );
       return;
     }
-    applySelection({ backendId });
+    applySelection({
+      backendId,
+      modelKind: "default",
+      modelValue: null,
+    });
   };
 
   const changeModel = (modelId: string) => {

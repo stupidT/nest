@@ -8,10 +8,12 @@ import {
 describe("deriveCapsules", () => {
   it("always offers Nest and hides Claude when the toggle is off", () => {
     const capsules = deriveCapsules({
+      activeBackendId: "nest",
       boundBackend: null,
       claudeEnabled: false,
       claudeStatus: "connected",
       claudeModelIds: ["glm-5.3"],
+      claudeDefaultModelLabel: null,
       nestModelLabel: "gpt-4o-mini",
     });
     expect(capsules.backends).toHaveLength(1);
@@ -22,10 +24,12 @@ describe("deriveCapsules", () => {
   it("offers Claude enabled when connected or last-connected", () => {
     for (const status of ["connected", "last_connected"] as const) {
       const capsules = deriveCapsules({
+        activeBackendId: "nest",
         boundBackend: null,
         claudeEnabled: true,
         claudeStatus: status,
         claudeModelIds: [],
+        claudeDefaultModelLabel: null,
         nestModelLabel: null,
       });
       expect(capsules.backends).toHaveLength(2);
@@ -35,10 +39,12 @@ describe("deriveCapsules", () => {
 
   it("keeps a disabled Claude entry with a reason when unavailable", () => {
     const capsules = deriveCapsules({
+      activeBackendId: "nest",
       boundBackend: null,
       claudeEnabled: true,
       claudeStatus: "unavailable",
       claudeModelIds: [],
+      claudeDefaultModelLabel: null,
       nestModelLabel: null,
     });
     expect(capsules.backends).toHaveLength(2);
@@ -46,44 +52,64 @@ describe("deriveCapsules", () => {
     expect(capsules.backends[1].disabledReason).toContain("unavailable");
   });
 
+  it("shows Nest models only when the active selection is Nest", () => {
+    const capsules = deriveCapsules({
+      activeBackendId: "nest",
+      boundBackend: null,
+      claudeEnabled: true,
+      claudeStatus: "connected",
+      claudeModelIds: ["glm-5.3"],
+      claudeDefaultModelLabel: "glm-5.3[1m]",
+      nestModelLabel: "gpt-4o-mini",
+    });
+    expect(capsules.models).toEqual([
+      { id: "default", label: "gpt-4o-mini" },
+    ]);
+  });
+
+  it("shows Claude models when the active selection is Claude", () => {
+    const capsules = deriveCapsules({
+      activeBackendId: "claude",
+      boundBackend: null,
+      claudeEnabled: true,
+      claudeStatus: "connected",
+      claudeModelIds: ["glm-5.3"],
+      claudeDefaultModelLabel: "glm-5.3[1m]",
+      nestModelLabel: "gpt-4o-mini",
+    });
+    expect(capsules.models).toEqual([
+      { id: "default", label: "glm-5.3[1m]" },
+      { id: "glm-5.3", label: "glm-5.3" },
+    ]);
+  });
+
+  it("falls back to a CLI Default label when no observed model exists", () => {
+    const capsules = deriveCapsules({
+      activeBackendId: "claude",
+      boundBackend: null,
+      claudeEnabled: true,
+      claudeStatus: "connected",
+      claudeModelIds: [],
+      claudeDefaultModelLabel: null,
+      nestModelLabel: null,
+    });
+    expect(capsules.models).toEqual([{ id: "default", label: "CLI Default" }]);
+  });
+
   it("locks the backend capsule once bound", () => {
     const capsules = deriveCapsules({
+      activeBackendId: "claude",
       boundBackend: "claude",
       claudeEnabled: true,
       claudeStatus: "connected",
       claudeModelIds: ["glm-5.3"],
+      claudeDefaultModelLabel: null,
       nestModelLabel: null,
     });
     expect(capsules.canChangeBackend).toBe(false);
     expect(capsules.models).toEqual([
       { id: "default", label: "CLI Default" },
       { id: "glm-5.3", label: "glm-5.3" },
-    ]);
-  });
-
-  it("shows the Nest API model for unbound Nest selection", () => {
-    const capsules = deriveCapsules({
-      boundBackend: "nest",
-      claudeEnabled: true,
-      claudeStatus: "connected",
-      claudeModelIds: ["glm-5.3"],
-      nestModelLabel: "gpt-4o-mini",
-    });
-    expect(capsules.models).toEqual([
-      { id: "default", label: "gpt-4o-mini" },
-    ]);
-  });
-
-  it("falls back to Nest models when Claude is unusable and unbound", () => {
-    const capsules = deriveCapsules({
-      boundBackend: null,
-      claudeEnabled: true,
-      claudeStatus: "unavailable",
-      claudeModelIds: ["glm-5.3"],
-      nestModelLabel: "gpt-4o-mini",
-    });
-    expect(capsules.models).toEqual([
-      { id: "default", label: "gpt-4o-mini" },
     ]);
   });
 });
