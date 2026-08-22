@@ -74,10 +74,21 @@ pub fn claude_model_options(state: State<'_, SharedState>) -> AppResult<Vec<Clau
         let conn = state.db.lock();
         db::get_settings(&conn)?
     };
-    let observed = {
+    let mut observed = {
         let conn = state.db.lock();
         db::observed_claude_models(&conn, &settings.claude_cli_path)?
     };
+    if let Some(memory) = state.claude_connection.lock().as_ref() {
+        if memory.status == ClaudeConnectionStatus::Connected
+            && memory.matches_configured(&settings.claude_cli_path)
+            && !memory.effective_model.trim().is_empty()
+        {
+            let model = memory.effective_model.trim().to_string();
+            if !observed.iter().any(|m| m == &model) {
+                observed.insert(0, model);
+            }
+        }
+    }
     Ok(
         db::claude_model_options(&observed, &settings.claude_custom_models)
             .into_iter()
@@ -90,8 +101,13 @@ pub fn claude_model_options(state: State<'_, SharedState>) -> AppResult<Vec<Clau
 }
 
 #[tauri::command]
-pub async fn claude_test_connection(cli_path: String) -> AppResult<ClaudeConnectionReport> {
-    Ok(test_connection(&cli_path).await)
+pub async fn claude_test_connection(
+    state: State<'_, SharedState>,
+    cli_path: String,
+) -> AppResult<ClaudeConnectionReport> {
+    let report = test_connection(&cli_path).await;
+    *state.claude_connection.lock() = Some(report.clone());
+    Ok(report)
 }
 
 #[tauri::command]
