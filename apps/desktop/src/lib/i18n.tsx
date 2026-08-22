@@ -125,7 +125,18 @@ const messages: Record<Locale, MessageTree> = {
         testedAt: "Tested at",
         customModels: "Custom models",
         customModelsDescription:
-          "One model ID per line. Used by the agent/model selector planned for Step 2.",
+          "One model ID per row. Used by the model selector in chat.",
+        addModel: "Add model",
+        modelRowLabel: "Model {{index}}",
+        removeModelRow: "Remove model {{index}}",
+        duplicateModel: "Duplicate",
+        detectionSucceeded: "Claude CLI {{version}} · {{strategy}}",
+        detectionFailed: "No Claude CLI found on PATH or npm locations",
+        detectionFailedPlaceholder:
+          "Claude CLI not found — enter the path manually",
+        detectedModels: "Detected models",
+        detectedModelsDescription:
+          "Models observed from successful tests and chats. Selectable in chat without adding them above.",
         couldNotDetect: "Could not detect Claude CLI",
         couldNotTest: "Could not test Claude connection",
         couldNotSave: "Could not save Claude settings",

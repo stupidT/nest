@@ -47,6 +47,7 @@ describe("ClaudeAgentSettingsSection", () => {
     expect(html).toContain("Test connection");
     expect(html).toContain("Custom models");
     expect(html).toContain("empty = auto-detect");
+    expect(html).toContain("Add model");
   });
 
   it("shows the plain Save action while the toggle is off", () => {
@@ -59,5 +60,11 @@ describe("ClaudeAgentSettingsSection", () => {
     const html = renderSection(undefined);
     expect(html).not.toContain("Connected");
     expect(html).not.toContain("Not connected");
+  });
+
+  it("uses the failure placeholder only after a failed detection", () => {
+    const html = renderSection(undefined);
+    expect(html).not.toContain("Claude CLI not found");
+    expect(html).toContain("empty = auto-detect");
   });
 });

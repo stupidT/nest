@@ -1,5 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { AppSettings, ClaudeConnectionReport } from "@nest/shared";
+import type {
+  AppSettings,
+  ClaudeConnectionReport,
+  ClaudeDetectionDto,
+} from "@nest/shared";
 import { CheckCircle2, LoaderCircle, Sparkles, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
@@ -8,10 +12,11 @@ import { Field } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 import { queryKeys } from "@/lib/query-keys";
+import { ClaudeModelsEditor } from "./ClaudeModelsEditor";
+import { parseModelRows, serializeModelRows } from "./model-rows";
 import { GeneralGroup } from "./GeneralGroup";
 
 type ClaudeDraft = {
@@ -30,19 +35,24 @@ function useClaudeAgentSettings(settingsQuery: {
     cliPath: "",
     customModels: "",
   });
+  const [modelRows, setModelRows] = useState<string[]>([""]);
   const [hydrated, setHydrated] = useState(false);
   const [testResult, setTestResult] = useState<ClaudeConnectionReport | null>(
     null,
   );
   const [stale, setStale] = useState(false);
+  const [detection, setDetection] = useState<ClaudeDetectionDto | null>(null);
+  const [detectFailed, setDetectFailed] = useState(false);
 
   useEffect(() => {
     if (!settingsQuery.data || hydrated) return;
+    const customModels = settingsQuery.data.claude_custom_models;
     setDraft({
       enabled: settingsQuery.data.claude_agent_enabled,
       cliPath: settingsQuery.data.claude_cli_path,
-      customModels: settingsQuery.data.claude_custom_models,
+      customModels,
     });
+    setModelRows(parseModelRows(customModels));
     setHydrated(true);
   }, [settingsQuery.data, hydrated]);
 
@@ -51,31 +61,36 @@ function useClaudeAgentSettings(settingsQuery: {
     queryFn: api.claudeConnectionStatus,
   });
 
+  const serializedModels = serializeModelRows(modelRows);
   const dirty =
     hydrated &&
     (draft.enabled !== (settingsQuery.data?.claude_agent_enabled ?? false) ||
       draft.cliPath !== (settingsQuery.data?.claude_cli_path ?? "") ||
-      draft.customModels !==
+      serializedModels !==
         (settingsQuery.data?.claude_custom_models ?? ""));
 
   const markDirty = () => setStale(true);
 
   const detect = useMutation({
     mutationFn: () => api.claudeDetectCli(draft.cliPath.trim() || undefined),
-    onSuccess: (detection) => {
-      setDraft((prev) => ({ ...prev, cliPath: detection.resolved_path }));
+    onSuccess: (result) => {
+      setDetection(result);
+      setDetectFailed(false);
+      setDraft((prev) => ({ ...prev, cliPath: result.resolved_path }));
       markDirty();
     },
-    onError: (e: unknown) => {
-      toast.error(t("settings.claude.couldNotDetect"), {
-        description: e instanceof Error ? e.message : String(e),
-      });
+    onError: () => {
+      setDetection(null);
+      setDetectFailed(true);
     },
   });
 
   const test = useMutation({
     mutationFn: () => api.claudeTestConnection(draft.cliPath),
-    onSuccess: (report) => setTestResult(report),
+    onSuccess: (report) => {
+      setTestResult(report);
+      setDetectFailed(false);
+    },
     onError: (e: unknown) => {
       toast.error(t("settings.claude.couldNotTest"), {
         description: e instanceof Error ? e.message : String(e),
@@ -88,11 +103,12 @@ function useClaudeAgentSettings(settingsQuery: {
       api.claudeSaveSettings({
         enabled: draft.enabled,
         cliPath: draft.cliPath,
-        customModels: draft.customModels,
+        customModels: serializedModels,
       }),
     onSuccess: (report) => {
       setTestResult(null);
       setStale(false);
+      setDetectFailed(false);
       void queryClient.invalidateQueries({ queryKey: queryKeys.settings });
       void queryClient.invalidateQueries({
         queryKey: queryKeys.claudeConnection,
@@ -124,6 +140,8 @@ function useClaudeAgentSettings(settingsQuery: {
   return {
     draft,
     setDraft,
+    modelRows,
+    setModelRows,
     detect,
     test,
     save,
@@ -131,6 +149,12 @@ function useClaudeAgentSettings(settingsQuery: {
     markDirty,
     testResult,
     persistedStatus,
+    detection,
+    detectFailed,
+    clearDetection: () => {
+      setDetection(null);
+      setDetectFailed(false);
+    },
   };
 }
 
@@ -143,6 +167,8 @@ export function ClaudeAgentSettingsSection({
   const {
     draft,
     setDraft,
+    modelRows,
+    setModelRows,
     detect,
     test,
     save,
@@ -150,6 +176,9 @@ export function ClaudeAgentSettingsSection({
     markDirty,
     testResult,
     persistedStatus,
+    detection,
+    detectFailed,
+    clearDetection,
   } = useClaudeAgentSettings(settingsQuery);
 
   const displayReport = testResult ?? persistedStatus;
@@ -191,9 +220,15 @@ export function ClaudeAgentSettingsSection({
             value={draft.cliPath}
             onChange={(e) => {
               setDraft((prev) => ({ ...prev, cliPath: e.target.value }));
+              clearDetection();
               markDirty();
             }}
-            placeholder="claude.exe · cli-wrapper.cjs · empty = auto-detect"
+            placeholder={
+              detectFailed
+                ? t("settings.claude.detectionFailedPlaceholder")
+                : "claude.exe · cli-wrapper.cjs · empty = auto-detect"
+            }
+            disabled={detect.isPending}
             className="min-w-0 flex-1 font-mono text-xs"
           />
           <Button
@@ -211,6 +246,27 @@ export function ClaudeAgentSettingsSection({
               : t("settings.claude.autoDetect")}
           </Button>
         </div>
+        {detect.isPending && (
+          <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <LoaderCircle className="size-3.5 animate-spin" />
+            {t("settings.claude.detecting")}
+          </p>
+        )}
+        {!detect.isPending && detection && (
+          <p className="flex items-center gap-1.5 text-xs text-primary">
+            <CheckCircle2 className="size-3.5 shrink-0" />
+            {t("settings.claude.detectionSucceeded", {
+              version: detection.cli_version ?? "?",
+              strategy: detection.spawn_strategy,
+            })}
+          </p>
+        )}
+        {!detect.isPending && detectFailed && (
+          <p className="flex items-center gap-1.5 text-xs text-destructive">
+            <XCircle className="size-3.5 shrink-0" />
+            {t("settings.claude.detectionFailed")}
+          </p>
+        )}
       </Field>
       <Field
         label={t("settings.claude.testConnection")}
@@ -300,15 +356,13 @@ export function ClaudeAgentSettingsSection({
         label={t("settings.claude.customModels")}
         description={t("settings.claude.customModelsDescription")}
       >
-        <Textarea
-          rows={4}
-          value={draft.customModels}
-          onChange={(e) => {
-            setDraft((prev) => ({ ...prev, customModels: e.target.value }));
+        <ClaudeModelsEditor
+          rows={modelRows}
+          disabled={save.isPending}
+          onChange={(rows) => {
+            setModelRows(rows);
             markDirty();
           }}
-          placeholder={"glm-5.3\nclaude-sonnet-4-5"}
-          className="font-mono text-xs"
         />
       </Field>
     </GeneralGroup>
