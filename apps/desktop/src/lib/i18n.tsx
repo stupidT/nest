@@ -111,6 +111,8 @@ const messages: Record<Locale, MessageTree> = {
         autoDetect: "Auto-detect",
         detecting: "Detecting…",
         testConnection: "Test connection",
+        testConnectionDescription:
+          "Runs a real CLI round trip. Saving applies the current draft.",
         saveAndConnect: "Save and connect",
         save: "Save",
         saving: "Saving…",

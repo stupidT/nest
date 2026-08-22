@@ -3,7 +3,7 @@ import type {
   AppSettings,
   ClaudeConnectionReport,
 } from "@nest/shared";
-import { CheckCircle2, LoaderCircle, Sparkles, XCircle } from "lucide-react";
+import { AlertCircle, CheckCircle2, LoaderCircle, Sparkles, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -221,7 +221,39 @@ export function ClaudeAgentSettingsSection({
       icon={Sparkles}
       title={t("settings.claude.group")}
       help={<p>{t("settings.claude.groupDescription")}</p>}
+      action={
+        <Button
+          type="button"
+          size="sm"
+          variant={dirty ? "default" : "outline"}
+          className={cn("shrink-0", dirty && "animate-pulse")}
+          disabled={save.isPending}
+          onClick={() => save.mutate()}
+        >
+          {save.isPending && (
+            <LoaderCircle className="size-3.5 animate-spin" />
+          )}
+          {save.isPending
+            ? t("settings.claude.saving")
+            : draft.enabled
+              ? t("settings.claude.saveAndConnect")
+              : t("settings.claude.save")}
+        </Button>
+      }
     >
+      {dirty && (
+        <div className="flex items-start gap-2.5 rounded-lg border border-primary/40 bg-primary/[0.08] px-3 py-2.5 shadow-sm">
+          <AlertCircle className="mt-0.5 size-4 shrink-0 text-primary" />
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-primary">
+              {t("settings.claude.unsavedChanges")}
+            </p>
+            <p className="text-xs text-muted-foreground">
+              {t("settings.claude.unsavedChangesDescription")}
+            </p>
+          </div>
+        </div>
+      )}
       <div className="flex items-start justify-between gap-4 rounded-lg bg-muted/40 px-3 py-3">
         <div className="min-w-0 space-y-1">
           <Label htmlFor="claude-enabled" className="text-sm font-medium">
@@ -282,11 +314,7 @@ export function ClaudeAgentSettingsSection({
       </Field>
       <Field
         label={t("settings.claude.testConnection")}
-        description={
-          draft.enabled
-            ? t("settings.claude.saveAndConnect")
-            : t("settings.claude.save")
-        }
+        description={t("settings.claude.testConnectionDescription")}
       >
         <div className="flex flex-wrap items-center gap-2">
           <Button
@@ -303,33 +331,7 @@ export function ClaudeAgentSettingsSection({
               ? t("settings.testing")
               : t("settings.claude.testConnection")}
           </Button>
-          <Button
-            type="button"
-            size="sm"
-            className={dirty ? "animate-pulse" : undefined}
-            disabled={save.isPending}
-            onClick={() => save.mutate()}
-          >
-            {save.isPending && (
-              <LoaderCircle className="size-3.5 animate-spin" />
-            )}
-            {save.isPending
-              ? t("settings.claude.saving")
-              : draft.enabled
-                ? t("settings.claude.saveAndConnect")
-                : t("settings.claude.save")}
-          </Button>
         </div>
-        {dirty && (
-          <div className="rounded-md border border-primary/30 bg-primary/[0.06] px-3 py-2">
-            <p className="text-xs font-medium text-primary">
-              {t("settings.claude.unsavedChanges")}
-            </p>
-            <p className="text-xs text-muted-foreground">
-              {t("settings.claude.unsavedChangesDescription")}
-            </p>
-          </div>
-        )}
         {displayReport && (
           <div className="space-y-1 rounded-md border bg-muted/30 px-3 py-2">
             <p
