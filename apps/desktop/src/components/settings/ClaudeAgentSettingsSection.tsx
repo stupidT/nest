@@ -2,7 +2,6 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
   AppSettings,
   ClaudeConnectionReport,
-  ClaudeDetectionDto,
 } from "@nest/shared";
 import { CheckCircle2, LoaderCircle, Sparkles, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -15,6 +14,7 @@ import { Switch } from "@/components/ui/switch";
 import { api } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 import { queryKeys } from "@/lib/query-keys";
+import { cn } from "@/lib/utils";
 import { ClaudeModelsEditor } from "./ClaudeModelsEditor";
 import { parseModelRows, serializeModelRows } from "./model-rows";
 import { GeneralGroup } from "./GeneralGroup";
@@ -41,7 +41,6 @@ function useClaudeAgentSettings(settingsQuery: {
     null,
   );
   const [stale, setStale] = useState(false);
-  const [detection, setDetection] = useState<ClaudeDetectionDto | null>(null);
   const [detectFailed, setDetectFailed] = useState(false);
   const [testedModel, setTestedModel] = useState<string | null>(null);
 
@@ -68,7 +67,8 @@ function useClaudeAgentSettings(settingsQuery: {
   });
   const persistedObserved = (modelOptionsQuery.data ?? [])
     .filter((option) => option.source === "observed")
-    .map((option) => option.model_id);
+    .map((option) => option.model_id)
+    .filter((model) => model.trim() !== "");
   const observedModels = testedModel
     ? [
         testedModel,
@@ -89,13 +89,11 @@ function useClaudeAgentSettings(settingsQuery: {
   const detect = useMutation({
     mutationFn: () => api.claudeDetectCli(draft.cliPath.trim() || undefined),
     onSuccess: (result) => {
-      setDetection(result);
       setDetectFailed(false);
       setDraft((prev) => ({ ...prev, cliPath: result.resolved_path }));
       markDirty();
     },
     onError: () => {
-      setDetection(null);
       setDetectFailed(true);
     },
   });
@@ -165,7 +163,6 @@ function useClaudeAgentSettings(settingsQuery: {
         : null;
 
   const clearDetection = () => {
-    setDetection(null);
     setDetectFailed(false);
     setTestedModel(null);
   };
@@ -182,7 +179,6 @@ function useClaudeAgentSettings(settingsQuery: {
     markDirty,
     testResult,
     persistedStatus,
-    detection,
     detectFailed,
     observedModels,
     clearDetection,
@@ -207,7 +203,6 @@ export function ClaudeAgentSettingsSection({
     markDirty,
     testResult,
     persistedStatus,
-    detection,
     detectFailed,
     observedModels,
     clearDetection,
@@ -261,7 +256,10 @@ export function ClaudeAgentSettingsSection({
                 : "claude.exe · cli-wrapper.cjs · empty = auto-detect"
             }
             disabled={detect.isPending}
-            className="min-w-0 flex-1 font-mono text-xs"
+            className={cn(
+              "min-w-0 flex-1 font-mono text-xs",
+              detectFailed && !draft.cliPath.trim() && "border-destructive",
+            )}
           />
           <Button
             type="button"
@@ -278,27 +276,6 @@ export function ClaudeAgentSettingsSection({
               : t("settings.claude.autoDetect")}
           </Button>
         </div>
-        {detect.isPending && (
-          <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <LoaderCircle className="size-3.5 animate-spin" />
-            {t("settings.claude.detecting")}
-          </p>
-        )}
-        {!detect.isPending && detection && (
-          <p className="flex items-center gap-1.5 text-xs text-primary">
-            <CheckCircle2 className="size-3.5 shrink-0" />
-            {t("settings.claude.detectionSucceeded", {
-              version: detection.cli_version ?? "?",
-              strategy: detection.spawn_strategy,
-            })}
-          </p>
-        )}
-        {!detect.isPending && detectFailed && (
-          <p className="flex items-center gap-1.5 text-xs text-destructive">
-            <XCircle className="size-3.5 shrink-0" />
-            {t("settings.claude.detectionFailed")}
-          </p>
-        )}
       </Field>
       <Field
         label={t("settings.claude.testConnection")}

@@ -130,10 +130,7 @@ const messages: Record<Locale, MessageTree> = {
         modelRowLabel: "Model {{index}}",
         removeModelRow: "Remove model {{index}}",
         duplicateModel: "Duplicate",
-        detectionSucceeded: "Claude CLI {{version}} · {{strategy}}",
-        detectionFailed: "No Claude CLI found on PATH or npm locations",
-        detectionFailedPlaceholder:
-          "Claude CLI not found — enter the path manually",
+        detectionFailedPlaceholder: "Auto-detect Not Found",
         detectedModels: "Detected models",
         detectedModelsDescription:
           "Models observed from successful tests and chats. Selectable in chat without adding them above.",

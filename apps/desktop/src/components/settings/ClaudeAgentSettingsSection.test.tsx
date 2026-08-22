@@ -62,9 +62,9 @@ describe("ClaudeAgentSettingsSection", () => {
     expect(html).not.toContain("Not connected");
   });
 
-  it("uses the failure placeholder only after a failed detection", () => {
+  it("uses the default placeholder before any detection attempt", () => {
     const html = renderSection(undefined);
-    expect(html).not.toContain("Claude CLI not found");
+    expect(html).not.toContain("Auto-detect Not Found");
     expect(html).toContain("empty = auto-detect");
   });
 });
