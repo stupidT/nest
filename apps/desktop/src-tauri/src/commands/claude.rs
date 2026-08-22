@@ -135,7 +135,11 @@ pub async fn claude_save_settings(
             ..Default::default()
         });
     }
-    let report = test_connection(&request.cli_path).await;
+    let mut report = test_connection(&request.cli_path).await;
+    if report.status != ClaudeConnectionStatus::Connected {
+        tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+        report = test_connection(&request.cli_path).await;
+    }
     if report.status == ClaudeConnectionStatus::Connected {
         let conn = state.db.lock();
         db::save_claude_connection_report(&conn, &report)?;

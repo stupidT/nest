@@ -135,15 +135,13 @@ function useClaudeAgentSettings(settingsQuery: {
       void queryClient.invalidateQueries({
         queryKey: queryKeys.claudeModelOptions,
       });
-      void queryClient.invalidateQueries({
-        queryKey: queryKeys.claudeModelOptions,
-      });
       void queryClient.invalidateQueries({ queryKey: queryKeys.chatSessions });
       if (report.status === "connected") {
         toast.success(t("settings.claude.statusConnected"));
-      } else if (report.message) {
+      } else {
         toast.error(t("settings.claude.statusDisconnected"), {
-          description: report.message,
+          description:
+            report.message ?? `probe status: ${report.status ?? "unknown"}`,
         });
       }
     },
