@@ -37,6 +37,12 @@ pub struct AppState {
     pub claude_connection: Mutex<Option<crate::db::ClaudeConnectionReport>>,
     pub hub_auth: Mutex<Option<AuthSession>>,
     pub hub_auth_refresh: tokio::sync::Mutex<()>,
+    pub mcp: Mutex<Option<McpRuntime>>,
+}
+
+pub struct McpRuntime {
+    pub server: Arc<crate::claude_mcp::McpServerState>,
+    pub handle: crate::claude_mcp::McpServerHandle,
 }
 
 impl AppState {
@@ -63,7 +69,29 @@ impl AppState {
             claude_connection: Mutex::new(None),
             hub_auth: Mutex::new(None),
             hub_auth_refresh: tokio::sync::Mutex::new(()),
+            mcp: Mutex::new(None),
         })
+    }
+
+    pub async fn ensure_mcp_server(self: &Arc<Self>) -> AppResult<()> {
+        {
+            let existing = self.mcp.lock();
+            if existing.is_some() {
+                return Ok(());
+            }
+        }
+        let server = crate::claude_mcp::McpServerState::new(self.clone());
+        let handle = crate::claude_mcp::start_server(server.clone()).await?;
+        *self.mcp.lock() = Some(McpRuntime { server, handle });
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub async fn stop_mcp_server(&self) {
+        let runtime = self.mcp.lock().take();
+        if let Some(runtime) = runtime {
+            runtime.handle.stop().await;
+        }
     }
 
     pub fn vault_path(&self) -> PathBuf {

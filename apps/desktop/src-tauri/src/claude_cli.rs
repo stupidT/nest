@@ -396,6 +396,8 @@ pub struct ClaudeTurnRequest<'a> {
     pub mode: TurnMode,
     pub prompt: &'a str,
     pub model: Option<&'a str>,
+    pub chat_mode: crate::knowledge_workspace::CapabilityMode,
+    pub mcp_config_path: Option<&'a Path>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -491,7 +493,13 @@ fn version_args() -> Vec<String> {
     vec!["--version".to_string()]
 }
 
-fn turn_args(mode: TurnMode, session_id: &str, model: Option<&str>) -> Vec<String> {
+fn turn_args(
+    mode: TurnMode,
+    session_id: &str,
+    model: Option<&str>,
+    chat_mode: crate::knowledge_workspace::CapabilityMode,
+    mcp_config_path: Option<&Path>,
+) -> Vec<String> {
     let mut args = vec![
         "-p".to_string(),
         "--output-format".to_string(),
@@ -512,6 +520,13 @@ fn turn_args(mode: TurnMode, session_id: &str, model: Option<&str>) -> Vec<Strin
     if let Some(model) = model {
         args.push("--model".to_string());
         args.push(model.to_string());
+    }
+    if let Some(config_path) = mcp_config_path {
+        args.push("--mcp-config".to_string());
+        args.push(config_path.display().to_string());
+        if chat_mode == crate::knowledge_workspace::CapabilityMode::Ask {
+            args.push("--strict-mcp-config".to_string());
+        }
     }
     args
 }
@@ -899,7 +914,13 @@ async fn execute_single_turn(
     events: &TurnEvents,
     cancel: &CancelToken,
 ) -> Result<ClaudeTurnResult, ClaudeTurnError> {
-    let args = turn_args(request.mode, request.session_id, request.model);
+    let args = turn_args(
+        request.mode,
+        request.session_id,
+        request.model,
+        request.chat_mode,
+        request.mcp_config_path,
+    );
     let mut command = spawn_command(detection, &args);
     command.current_dir(request.vault_root);
     let mut guard = ChildGuard::spawn(command).map_err(|error| ClaudeTurnError::SpawnFailed {
@@ -2368,6 +2389,8 @@ fs.writeFileSync('attempts.txt', String(attempts + 1));
             mode: TurnMode::NewSession,
             prompt: "hi",
             model: None,
+            chat_mode: crate::knowledge_workspace::CapabilityMode::Agent,
+            mcp_config_path: None,
         };
         let cancel = never_cancel();
         let result = run_turn(&detection, request, &events, &cancel)
@@ -2391,9 +2414,81 @@ fs.writeFileSync('attempts.txt', String(attempts + 1));
             mode: TurnMode::NewSession,
             prompt: "from stdin",
             model: None,
+            chat_mode: crate::knowledge_workspace::CapabilityMode::Agent,
+            mcp_config_path: None,
         };
         let result = run(&detection, request).await.unwrap();
         assert_eq!(result.answer, "mode:new:from stdin:");
+    }
+
+    #[tokio::test]
+    async fn ask_turn_with_mcp_config_uses_strict_flag() {
+        let fx = Fixture::new("turn-mcp-ask");
+        let script = r#"
+const fs = require('fs');
+const args = process.argv.slice(2);
+const prompt = fs.readFileSync(0, 'utf8');
+const mcpIndex = args.indexOf('--mcp-config');
+const mcp = mcpIndex >= 0 ? args[mcpIndex + 1] : 'none';
+const strict = args.includes('--strict-mcp-config') ? 'STRICT' : 'OPEN';
+const config = mcp === 'none' ? '{}' : fs.readFileSync(mcp, 'utf8');
+const parsed = JSON.parse(config);
+const serverNames = Object.keys(parsed.mcpServers ?? {}).join(',');
+const lines = [];
+lines.push(JSON.stringify({type:'system',subtype:'init',session_id:'11111111-2222-4333-8444-555555555555',model:'m',claude_code_version:'v'}));
+lines.push(JSON.stringify({type:'result',subtype:'success',session_id:'11111111-2222-4333-8444-555555555555',result:strict + ':' + serverNames}));
+for (const line of lines) { console.log(line); }
+"#;
+        let detection = fx.write_fake_cli(script);
+        let config_path = fx.root.join("mcp.json");
+        std::fs::write(
+            &config_path,
+            serde_json::json!({
+                "mcpServers": { "nest": { "type": "http", "url": "http://127.0.0.1:9/x" } }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let request = ClaudeTurnRequest {
+            vault_root: &fx.vault_root(),
+            session_id: "11111111-2222-4333-8444-555555555555",
+            mode: TurnMode::NewSession,
+            prompt: "hi",
+            model: None,
+            chat_mode: crate::knowledge_workspace::CapabilityMode::Ask,
+            mcp_config_path: Some(config_path.as_path()),
+        };
+        let result = run(&detection, request).await.unwrap();
+        assert_eq!(result.answer, "STRICT:nest");
+    }
+
+    #[tokio::test]
+    async fn agent_turn_with_mcp_config_has_no_strict_flag() {
+        let fx = Fixture::new("turn-mcp-agent");
+        let script = r#"
+const fs = require('fs');
+const args = process.argv.slice(2);
+const prompt = fs.readFileSync(0, 'utf8');
+const strict = args.includes('--strict-mcp-config') ? 'STRICT' : 'OPEN';
+const lines = [];
+lines.push(JSON.stringify({type:'system',subtype:'init',session_id:'11111111-2222-4333-8444-555555555555',model:'m',claude_code_version:'v'}));
+lines.push(JSON.stringify({type:'result',subtype:'success',session_id:'11111111-2222-4333-8444-555555555555',result:strict}));
+for (const line of lines) { console.log(line); }
+"#;
+        let detection = fx.write_fake_cli(script);
+        let config_path = fx.root.join("mcp.json");
+        std::fs::write(&config_path, "{}").unwrap();
+        let request = ClaudeTurnRequest {
+            vault_root: &fx.vault_root(),
+            session_id: "11111111-2222-4333-8444-555555555555",
+            mode: TurnMode::NewSession,
+            prompt: "hi",
+            model: None,
+            chat_mode: crate::knowledge_workspace::CapabilityMode::Agent,
+            mcp_config_path: Some(config_path.as_path()),
+        };
+        let result = run(&detection, request).await.unwrap();
+        assert_eq!(result.answer, "OPEN");
     }
 
     #[tokio::test]
@@ -2406,6 +2501,8 @@ fs.writeFileSync('attempts.txt', String(attempts + 1));
             mode: TurnMode::Resume,
             prompt: "next",
             model: None,
+            chat_mode: crate::knowledge_workspace::CapabilityMode::Agent,
+            mcp_config_path: None,
         };
         let result = run(&detection, request).await.unwrap();
         assert_eq!(result.answer, "mode:resume:next:");
@@ -2428,6 +2525,8 @@ for (const line of lines) { console.log(line); }"#,
             mode: TurnMode::NewSession,
             prompt: "retry me",
             model: None,
+            chat_mode: crate::knowledge_workspace::CapabilityMode::Agent,
+            mcp_config_path: None,
         };
         let result = run(&detection, request).await.unwrap();
         assert_eq!(result.answer, "recovered:retry me");
@@ -2451,6 +2550,8 @@ process.exit(2);"#,
             mode: TurnMode::NewSession,
             prompt: "hi",
             model: None,
+            chat_mode: crate::knowledge_workspace::CapabilityMode::Agent,
+            mcp_config_path: None,
         };
         let error = run(&detection, request).await.unwrap_err();
         match error {
@@ -2481,6 +2582,8 @@ process.exit(2);"#,
             mode: TurnMode::NewSession,
             prompt: "hi",
             model: None,
+            chat_mode: crate::knowledge_workspace::CapabilityMode::Agent,
+            mcp_config_path: None,
         };
         let error = run(&detection, request).await.unwrap_err();
         assert!(matches!(error, ClaudeTurnError::Protocol { .. }));
@@ -2501,6 +2604,8 @@ process.exit(2);"#,
             mode: TurnMode::Resume,
             prompt: "hi",
             model: None,
+            chat_mode: crate::knowledge_workspace::CapabilityMode::Agent,
+            mcp_config_path: None,
         };
         let error = run(&detection, request).await.unwrap_err();
         assert!(matches!(
@@ -2534,6 +2639,8 @@ for (const line of lines) {{ console.log(line); }}
             mode: TurnMode::NewSession,
             prompt: "hi",
             model: None,
+            chat_mode: crate::knowledge_workspace::CapabilityMode::Agent,
+            mcp_config_path: None,
         };
         let error = run(&detection, request).await.unwrap_err();
         match error {
@@ -2574,6 +2681,8 @@ process.exit(3);
             mode: TurnMode::NewSession,
             prompt: "hi",
             model: None,
+            chat_mode: crate::knowledge_workspace::CapabilityMode::Agent,
+            mcp_config_path: None,
         };
         let error = run(&detection, request).await.unwrap_err();
         match error {
@@ -2601,6 +2710,8 @@ process.exit(3);
             mode: TurnMode::NewSession,
             prompt: "hi",
             model: None,
+            chat_mode: crate::knowledge_workspace::CapabilityMode::Agent,
+            mcp_config_path: None,
         };
         let error = run(&detection, request).await.unwrap_err();
         match error {
@@ -2631,6 +2742,8 @@ process.exit(3);
             mode: TurnMode::NewSession,
             prompt: "hi",
             model: None,
+            chat_mode: crate::knowledge_workspace::CapabilityMode::Agent,
+            mcp_config_path: None,
         };
         let events = TurnEvents::default();
         let cancel_for_task = cancel.clone();
@@ -2664,6 +2777,8 @@ process.exit(3);
             mode: TurnMode::NewSession,
             prompt: "hi",
             model: None,
+            chat_mode: crate::knowledge_workspace::CapabilityMode::Agent,
+            mcp_config_path: None,
         };
         let error = run(&detection, request).await.unwrap_err();
         assert!(matches!(error, ClaudeTurnError::SpawnFailed { .. }));
@@ -2683,6 +2798,8 @@ process.exit(3);
             mode: TurnMode::NewSession,
             prompt: "hi",
             model: None,
+            chat_mode: crate::knowledge_workspace::CapabilityMode::Agent,
+            mcp_config_path: None,
         };
         let cancel = never_cancel();
         let error = run_turn(&detection, request, &events, &cancel)
@@ -2706,6 +2823,8 @@ process.exit(3);
             mode: TurnMode::NewSession,
             prompt: "hi",
             model: None,
+            chat_mode: crate::knowledge_workspace::CapabilityMode::Agent,
+            mcp_config_path: None,
         };
         let error = run(&detection, request).await.unwrap_err();
         match error {
@@ -2729,6 +2848,8 @@ for (const line of lines) { console.log(line); }
             mode: TurnMode::NewSession,
             prompt: "hi",
             model: None,
+            chat_mode: crate::knowledge_workspace::CapabilityMode::Agent,
+            mcp_config_path: None,
         };
         let error = run(&detection, request).await.unwrap_err();
         assert!(matches!(error, ClaudeTurnError::SessionMismatch { .. }));

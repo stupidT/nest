@@ -97,6 +97,7 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
         settings,
         session,
         query,
+        mode,
         stream_event,
         ..
     } = request;
@@ -116,6 +117,12 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
     let detection = detections
         .first()
         .ok_or_else(|| crate::error::AppError::msg("claude_cli: no CLI candidate resolved"))?;
+
+    let chat_mode = if mode == "agent" {
+        crate::knowledge_workspace::CapabilityMode::Agent
+    } else {
+        crate::knowledge_workspace::CapabilityMode::Ask
+    };
 
     let vault_root = state.vault_path();
     let session_id = session.id.clone();
@@ -149,17 +156,37 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
         }),
     };
 
+    state.ensure_mcp_server().await?;
+    let (mcp_server, mcp_config_path) = {
+        let mcp = state.mcp.lock();
+        let runtime = mcp
+            .as_ref()
+            .ok_or_else(|| crate::error::AppError::msg("nest_mcp_unavailable"))?;
+        let credential = runtime
+            .server
+            .begin_turn(&session_id, chat_mode, Vec::new());
+        let config_path =
+            std::env::temp_dir().join(format!("nest-mcp-{}.json", uuid::Uuid::new_v4().simple()));
+        std::fs::write(&config_path, runtime.handle.config_json(&credential))?;
+        (runtime.server.clone(), config_path)
+    };
+
     let turn_request = ClaudeTurnRequest {
         vault_root: &vault_root,
         session_id: &session_id,
         mode: turn_mode,
         prompt: &query,
         model: request.requested_model.cli_model_arg(),
+        chat_mode,
+        mcp_config_path: Some(mcp_config_path.as_path()),
     };
     let cancel = state.begin_chat_cancel_arc();
     let result = match claude_cli::run_turn(detection, turn_request, &events, &cancel).await {
         Ok(result) => result,
         Err(error) => {
+            let _ = std::fs::remove_file(&mcp_config_path);
+            mcp_server.abort_staged();
+            mcp_server.end_turn();
             let mapped = map_turn_error(&error);
             if is_unresumable_failure(&error) {
                 let updated = {
@@ -184,12 +211,16 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
         }
     };
 
+    let file_changes = mcp_server.finish_staged().unwrap_or_default();
+    mcp_server.end_turn();
+    let _ = std::fs::remove_file(&mcp_config_path);
+
     Ok(ChatRunResult {
         answer: result.answer,
         citations: Vec::new(),
         thinking: (!result.thinking.trim().is_empty()).then_some(result.thinking),
         thinking_seconds: None,
-        file_changes: Vec::new(),
+        file_changes,
         backend: ChatBackend::Claude,
         effective_model: result.model,
     })
