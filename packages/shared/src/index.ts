@@ -425,8 +425,14 @@ export type GeneralSettingsUpdate = Omit<
   "claude_agent_enabled" | "claude_cli_path" | "claude_custom_models"
 >;
 
+export type ClaudeConnectionStatus =
+  | "disabled"
+  | "connected"
+  | "last_connected"
+  | "unavailable";
+
 export type ClaudeConnectionReport = {
-  connected: boolean;
+  status: ClaudeConnectionStatus;
   configured_cli_path: string;
   resolved_cli_path: string;
   cli_version: string;

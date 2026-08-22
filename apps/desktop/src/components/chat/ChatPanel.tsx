@@ -15,6 +15,7 @@ import { ChatFileChanges } from "@/components/chat/ChatFileChanges";
 import { MentionComposer, type MentionRef } from "@/components/chat/MentionComposer";
 import { renderWithMentions } from "@/components/chat/mention-pill";
 import { collectMentionCandidates } from "@/lib/tree-mentions";
+import { claudeBackendNotice, claudeComposerGate } from "@/lib/claude-composer";
 import { MarkdownBody } from "@/components/markdown/MarkdownBody";
 import {
   Accordion,
@@ -149,42 +150,17 @@ export function ChatPanel() {
     queryKey: queryKeys.claudeConnection,
     queryFn: api.claudeConnectionStatus,
   });
-  const claudeEnabled = claudeConnectionQuery.data?.connected ?? false;
-  const claudeConfigured =
-    claudeConnectionQuery.data?.configured_cli_path !== undefined;
+  const claudeStatus = claudeConnectionQuery.data?.status ?? null;
 
-  const sessionBackend = currentSession?.backend ?? null;
-  const sessionBackendStatus = currentSession?.backend_status ?? "uninitialized";
-
-  const composerBlocked: string | null = (() => {
-    if (isSending) return null;
-    if (sessionBackend === "claude") {
-      if (sessionBackendStatus === "unresumable") {
-        return "This Claude conversation can no longer be resumed. Start a new chat.";
-      }
-      if (!claudeConfigured) {
-        return "Claude Agent is disabled. Re-enable it in Settings to continue this chat.";
-      }
-      if (!claudeEnabled) {
-        return "Claude connection is unavailable. Fix it in Settings to continue this chat.";
-      }
-      return null;
-    }
-    if (sessionBackend === null && claudeConfigured && !claudeEnabled) {
-      return "Claude Agent is enabled but not connected. Test the connection in Settings before chatting.";
-    }
-    return null;
-  })();
-
-  const backendNotice: string | null = (() => {
-    if (sessionBackend === "claude" && !claudeEnabled && claudeConfigured) {
-      return "Settings changes apply to new chats only.";
-    }
-    if (sessionBackend === "nest" && claudeEnabled) {
-      return "Settings changes apply to new chats only.";
-    }
-    return null;
-  })();
+  const composerGate = claudeComposerGate(
+    currentSession ? { backend: currentSession.backend, backend_status: currentSession.backend_status } : null,
+    claudeStatus,
+  );
+  const composerBlocked: string | null = isSending ? null : composerGate.reason;
+  const backendNotice = claudeBackendNotice(
+    currentSession ? { backend: currentSession.backend, backend_status: currentSession.backend_status } : null,
+    claudeStatus,
+  );
 
   const changeMode = (nextMode: ChatMode) => {
     if (!sessionId || isSending || nextMode === mode) return;
@@ -401,6 +377,7 @@ export function ChatPanel() {
         void queryClient.invalidateQueries({
           queryKey: queryKeys.chatMessages(vars.sessionId),
         });
+        void queryClient.invalidateQueries({ queryKey: queryKeys.chatSessions });
         return;
       }
       setChatError(message);
@@ -413,6 +390,10 @@ export function ChatPanel() {
       setLiveFileActivities([]);
       setPendingSessionId(null);
       setAgentRunActive(false);
+      void queryClient.invalidateQueries({ queryKey: queryKeys.chatSessions });
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.claudeConnection,
+      });
     },
   });
 

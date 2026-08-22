@@ -117,6 +117,7 @@ const messages: Record<Locale, MessageTree> = {
         notSaved: "Tested, not saved",
         stale: "Settings changed since the last test",
         statusConnected: "Connected",
+        statusLastConnected: "Last connected",
         statusDisconnected: "Not connected",
         resolvedPath: "Resolved CLI",
         cliVersion: "CLI version",
