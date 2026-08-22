@@ -18,11 +18,14 @@ pub struct ClaudeSettingsRequest {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ClaudeDetectionDto {
+    #[serde(rename = "configured_path")]
     pub configured_path: String,
+    #[serde(rename = "resolved_path")]
     pub resolved_path: String,
+    #[serde(rename = "spawn_strategy")]
     pub spawn_strategy: String,
+    #[serde(rename = "cli_version")]
     pub cli_version: Option<String>,
 }
 
@@ -62,8 +65,8 @@ fn spawn_strategy_name(target: &claude_cli::ClaudeLaunchTarget) -> String {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ClaudeModelOptionDto {
+    #[serde(rename = "model_id")]
     pub model_id: String,
     pub source: String,
 }
