@@ -67,7 +67,7 @@ function useClaudeAgentSettings(settingsQuery: {
   });
   const persistedObserved = (modelOptionsQuery.data ?? [])
     .filter((option) => option.source === "observed")
-    .map((option) => option.model_id)
+    .map((option) => option.model_id ?? "")
     .filter((model) => model.trim() !== "");
   const observedModels = testedModel
     ? [
