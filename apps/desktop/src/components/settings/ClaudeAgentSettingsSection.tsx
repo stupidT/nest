@@ -61,6 +61,14 @@ function useClaudeAgentSettings(settingsQuery: {
     queryFn: api.claudeConnectionStatus,
   });
 
+  const modelOptionsQuery = useQuery({
+    queryKey: queryKeys.claudeModelOptions,
+    queryFn: api.claudeModelOptions,
+  });
+  const observedModels = (modelOptionsQuery.data ?? [])
+    .filter((option) => option.source === "observed")
+    .map((option) => option.model_id);
+
   const serializedModels = serializeModelRows(modelRows);
   const dirty =
     hydrated &&
@@ -90,6 +98,9 @@ function useClaudeAgentSettings(settingsQuery: {
     onSuccess: (report) => {
       setTestResult(report);
       setDetectFailed(false);
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.claudeModelOptions,
+      });
     },
     onError: (e: unknown) => {
       toast.error(t("settings.claude.couldNotTest"), {
@@ -112,6 +123,9 @@ function useClaudeAgentSettings(settingsQuery: {
       void queryClient.invalidateQueries({ queryKey: queryKeys.settings });
       void queryClient.invalidateQueries({
         queryKey: queryKeys.claudeConnection,
+      });
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.claudeModelOptions,
       });
       void queryClient.invalidateQueries({ queryKey: queryKeys.chatSessions });
       if (report.status === "connected") {
@@ -151,6 +165,7 @@ function useClaudeAgentSettings(settingsQuery: {
     persistedStatus,
     detection,
     detectFailed,
+    observedModels,
     clearDetection: () => {
       setDetection(null);
       setDetectFailed(false);
@@ -178,6 +193,7 @@ export function ClaudeAgentSettingsSection({
     persistedStatus,
     detection,
     detectFailed,
+    observedModels,
     clearDetection,
   } = useClaudeAgentSettings(settingsQuery);
 
@@ -365,6 +381,23 @@ export function ClaudeAgentSettingsSection({
           }}
         />
       </Field>
+      {observedModels.length > 0 && (
+        <Field
+          label={t("settings.claude.detectedModels")}
+          description={t("settings.claude.detectedModelsDescription")}
+        >
+          <ul className="flex flex-wrap gap-1.5">
+            {observedModels.map((model) => (
+              <li
+                key={model}
+                className="rounded-md border bg-muted/40 px-2 py-1 font-mono text-xs"
+              >
+                {model}
+              </li>
+            ))}
+          </ul>
+        </Field>
+      )}
     </GeneralGroup>
   );
 }

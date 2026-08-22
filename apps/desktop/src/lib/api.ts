@@ -8,6 +8,7 @@ import type {
   ChatSession,
   ClaudeConnectionReport,
   ClaudeDetectionDto,
+  ClaudeModelOption,
   ClaudeSettingsRequest,
   DiffPair,
   FileStatus,
@@ -117,6 +118,8 @@ export const api = {
     invoke<ClaudeConnectionReport>("claude_save_settings", { request }),
   claudeConnectionStatus: () =>
     invoke<ClaudeConnectionReport>("claude_connection_status"),
+  claudeModelOptions: () =>
+    invoke<ClaudeModelOption[]>("claude_model_options"),
 
   indexStatus: () => invoke<IndexStatus>("index_status"),
   indexRebuild: () => invoke<IndexStatus>("index_rebuild"),

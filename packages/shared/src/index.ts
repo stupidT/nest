@@ -454,6 +454,11 @@ export type ClaudeDetectionDto = {
   cli_version: string | null;
 };
 
+export type ClaudeModelOption = {
+  model_id: string;
+  source: "default" | "observed" | "custom";
+};
+
 export type Citation = {
   chunk_id: string;
   file_path: string;
