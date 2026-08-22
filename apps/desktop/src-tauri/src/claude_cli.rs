@@ -445,9 +445,12 @@ pub enum ClaudeTurnError {
 pub type InitializedCallback<'a> =
     Box<dyn Fn(&str, Option<&str>, Option<&str>) -> Result<(), String> + Send + Sync + 'a>;
 
+pub type ToolCallback = Box<dyn Fn(&str, Option<&str>) + Send + Sync>;
+
 pub struct TurnEvents {
     pub token: Box<dyn Fn(&str) + Send + Sync>,
     pub thinking: Box<dyn Fn(&str) + Send + Sync>,
+    pub tool: ToolCallback,
     pub initialized: InitializedCallback<'static>,
 }
 
@@ -456,6 +459,7 @@ impl Default for TurnEvents {
         Self {
             token: Box::new(|_| {}),
             thinking: Box::new(|_| {}),
+            tool: Box::new(|_, _| {}),
             initialized: Box::new(|_, _, _| Ok(())),
         }
     }
@@ -1009,6 +1013,9 @@ async fn execute_single_turn(
                         match parser.ingest_line(&line) {
                             Ok(Some(ParserEvent::Token(text))) => (events.token)(&text),
                             Ok(Some(ParserEvent::Thinking(text))) => (events.thinking)(&text),
+                            Ok(Some(ParserEvent::ToolCall { name, target })) => {
+                                (events.tool)(&name, target.as_deref());
+                            }
                             Ok(Some(ParserEvent::Initialized { session_id, model, cli_version })) => {
                                 if let Err(message) = (events.initialized)(
                                     &session_id,
@@ -1098,6 +1105,18 @@ async fn execute_single_turn(
     }
 }
 
+fn tool_target(input: Option<&serde_json::Value>) -> Option<String> {
+    let input = input?;
+    if let Some(path) = input.get("path").and_then(|value| value.as_str()) {
+        return Some(path.to_string());
+    }
+    if let Some(query) = input.get("query").and_then(|value| value.as_str()) {
+        let clipped: String = query.chars().take(48).collect();
+        return Some(clipped);
+    }
+    None
+}
+
 fn turn_error_from_parser(error: ClaudeError) -> ClaudeTurnError {
     match error.code() {
         ClaudeErrorCode::SessionMismatch => ClaudeTurnError::SessionMismatch {
@@ -1117,6 +1136,10 @@ pub enum ParserEvent {
         session_id: String,
         model: Option<String>,
         cli_version: Option<String>,
+    },
+    ToolCall {
+        name: String,
+        target: Option<String>,
     },
 }
 
@@ -1224,10 +1247,7 @@ impl StreamParser {
         match kind {
             "system" => self.handle_system(&value),
             "stream_event" => self.handle_stream_event(&value),
-            "assistant" => {
-                self.handle_assistant(&value);
-                Ok(None)
-            }
+            "assistant" => self.handle_assistant(&value),
             "result" => {
                 self.handle_result(&value)?;
                 Ok(None)
@@ -1282,6 +1302,22 @@ impl StreamParser {
         let Some(event) = value.get("event") else {
             return Ok(None);
         };
+        if event.get("type").and_then(|value| value.as_str()) == Some("content_block_start")
+            && event
+                .get("content_block")
+                .and_then(|block| block.get("type"))
+                .and_then(|value| value.as_str())
+                == Some("tool_use")
+        {
+            let name = event
+                .pointer("/content_block/name")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown_tool");
+            return Ok(Some(ParserEvent::ToolCall {
+                name: name.to_string(),
+                target: None,
+            }));
+        }
         if event.get("type").and_then(|value| value.as_str()) != Some("content_block_delta") {
             return Ok(None);
         }
@@ -1315,16 +1351,20 @@ impl StreamParser {
         }
     }
 
-    fn handle_assistant(&mut self, value: &serde_json::Value) {
+    fn handle_assistant(
+        &mut self,
+        value: &serde_json::Value,
+    ) -> Result<Option<ParserEvent>, ClaudeError> {
         let Some(content) = value
             .get("message")
             .and_then(|message| message.get("content"))
             .and_then(|content| content.as_array())
         else {
-            return;
+            return Ok(None);
         };
         let mut text = String::new();
         let mut thinking = String::new();
+        let mut tool_call: Option<ParserEvent> = None;
         for block in content {
             match block.get("type").and_then(|value| value.as_str()) {
                 Some("text") => {
@@ -1337,6 +1377,16 @@ impl StreamParser {
                         thinking.push_str(chunk);
                     }
                 }
+                Some("tool_use") if tool_call.is_none() => {
+                    let name = block
+                        .get("name")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("unknown_tool");
+                    tool_call = Some(ParserEvent::ToolCall {
+                        name: name.to_string(),
+                        target: tool_target(block.get("input")),
+                    });
+                }
                 _ => {}
             }
         }
@@ -1346,6 +1396,7 @@ impl StreamParser {
         if !thinking.is_empty() {
             self.state.assistant_thinking = Some(thinking);
         }
+        Ok(tool_call)
     }
 
     fn handle_result(&mut self, value: &serde_json::Value) -> Result<(), ClaudeError> {
@@ -2210,6 +2261,51 @@ mod parser_tests {
             panic!("expected success");
         };
         assert_eq!(thinking, "deep");
+    }
+
+    #[test]
+    fn tool_use_in_assistant_message_emits_tool_call_with_target() {
+        let mut parser = StreamParser::new(SESSION);
+        feed_init(&mut parser);
+        let assistant = format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","name":"mcp__nest__knowledge_list","input":{{"query":null}}}}]}},"session_id":"{SESSION}"}}"#
+        );
+        let event = parser.ingest_line(&assistant).unwrap();
+        assert_eq!(
+            event,
+            Some(ParserEvent::ToolCall {
+                name: "mcp__nest__knowledge_list".to_string(),
+                target: None,
+            })
+        );
+    }
+
+    #[test]
+    fn tool_use_in_stream_block_start_emits_tool_call() {
+        let mut parser = StreamParser::new(SESSION);
+        feed_init(&mut parser);
+        let block = format!(
+            r#"{{"type":"stream_event","event":{{"type":"content_block_start","index":2,"content_block":{{"type":"tool_use","id":"tu1","name":"mcp__nest__knowledge_read","input":{{}}}}}},"session_id":"{SESSION}"}}"#
+        );
+        let event = parser.ingest_line(&block).unwrap();
+        assert_eq!(
+            event,
+            Some(ParserEvent::ToolCall {
+                name: "mcp__nest__knowledge_read".to_string(),
+                target: None,
+            })
+        );
+    }
+
+    #[test]
+    fn tool_target_extracts_path_and_clips_query() {
+        assert_eq!(
+            tool_target(Some(&serde_json::json!({ "path": "pack/note.md" }))),
+            Some("pack/note.md".to_string())
+        );
+        let long_query = "q".repeat(80);
+        let target = tool_target(Some(&serde_json::json!({ "query": long_query })));
+        assert_eq!(target.map(|t| t.chars().count()), Some(48));
     }
 }
 

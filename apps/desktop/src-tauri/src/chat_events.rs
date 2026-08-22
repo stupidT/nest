@@ -18,6 +18,10 @@ pub enum ChatStreamEvent {
         path: String,
         operation: String,
     },
+    ToolActivity {
+        label: String,
+        target: Option<String>,
+    },
     /// Retrieval finished; waiting on / streaming the model reply.
     Generating,
     Citations {

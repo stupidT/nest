@@ -131,6 +131,8 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
     let stream_token = stream_event.clone();
     let app_thinking = app.clone();
     let stream_thinking = stream_event.clone();
+    let app_tool = app.clone();
+    let stream_tool = stream_event.clone();
     let events = TurnEvents {
         token: Box::new(move |text| {
             let _ = app_token.emit(
@@ -145,6 +147,15 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
                 &stream_thinking,
                 ChatStreamEvent::Thinking {
                     content: text.to_string(),
+                },
+            );
+        }),
+        tool: Box::new(move |name, target| {
+            let _ = app_tool.emit(
+                &stream_tool,
+                ChatStreamEvent::ToolActivity {
+                    label: name.to_string(),
+                    target: target.map(str::to_string),
                 },
             );
         }),
