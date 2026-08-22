@@ -303,6 +303,7 @@ export function ClaudeAgentSettingsSection({
           <Button
             type="button"
             size="sm"
+            className={dirty ? "animate-pulse" : undefined}
             disabled={save.isPending}
             onClick={() => save.mutate()}
           >
@@ -317,9 +318,14 @@ export function ClaudeAgentSettingsSection({
           </Button>
         </div>
         {dirty && (
-          <p className="text-xs text-muted-foreground">
-            {t("settings.claude.notSaved")}
-          </p>
+          <div className="rounded-md border border-primary/30 bg-primary/[0.06] px-3 py-2">
+            <p className="text-xs font-medium text-primary">
+              {t("settings.claude.unsavedChanges")}
+            </p>
+            <p className="text-xs text-muted-foreground">
+              {t("settings.claude.unsavedChangesDescription")}
+            </p>
+          </div>
         )}
         {displayReport && (
           <div className="space-y-1 rounded-md border bg-muted/30 px-3 py-2">

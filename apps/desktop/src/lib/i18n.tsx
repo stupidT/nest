@@ -115,6 +115,9 @@ const messages: Record<Locale, MessageTree> = {
         save: "Save",
         saving: "Saving…",
         notSaved: "Tested, not saved",
+        unsavedChanges: "Unsaved changes",
+        unsavedChangesDescription:
+          "Apply your changes with Save for them to take effect in chat.",
         stale: "Settings changed since the last test",
         statusConnected: "Connected",
         statusLastConnected: "Last connected",
