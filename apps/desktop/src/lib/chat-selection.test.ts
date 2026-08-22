@@ -83,6 +83,22 @@ describe("deriveCapsules", () => {
     ]);
   });
 
+  it("drops the explicit entry duplicating the default model label", () => {
+    const capsules = deriveCapsules({
+      activeBackendId: "claude",
+      boundBackend: null,
+      claudeEnabled: true,
+      claudeStatus: "connected",
+      claudeModelIds: ["glm-5.3[1m]", "glm-5.3"],
+      claudeDefaultModelLabel: "glm-5.3[1m]",
+      nestModelLabel: null,
+    });
+    expect(capsules.models).toEqual([
+      { id: "default", label: "glm-5.3[1m]" },
+      { id: "glm-5.3", label: "glm-5.3" },
+    ]);
+  });
+
   it("falls back to a CLI Default label when no observed model exists", () => {
     const capsules = deriveCapsules({
       activeBackendId: "claude",
