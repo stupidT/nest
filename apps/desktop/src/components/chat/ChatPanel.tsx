@@ -471,6 +471,19 @@ export function ChatPanel() {
         (event: ChatStreamEvent) => {
           if (event.type === "reading") {
             setAgentActivity({ kind: "reading", path: event.path });
+          } else if (event.type === "tool_activity") {
+            const tool = event.label.replace(/^mcp__nest__/, "");
+            setAgentActivity((prev) =>
+              prev?.kind === "reading" ? prev : { kind: "generating" },
+            );
+            setLiveFileActivities((current) => {
+              const path = event.target ?? event.label;
+              const operation = tool;
+              return [
+                ...current.filter((item) => item.path !== path),
+                { path, operation, staged: false },
+              ];
+            });
           } else if (event.type === "file_editing") {
             setAgentActivity({ kind: "editing", path: event.path });
             setLiveFileActivities((current) => [

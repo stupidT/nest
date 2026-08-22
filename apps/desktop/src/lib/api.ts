@@ -345,6 +345,7 @@ export type ChatStreamEvent =
   | { type: "reading"; path: string }
   | { type: "file_editing"; path: string; operation: string }
   | { type: "file_staged"; path: string; operation: string }
+  | { type: "tool_activity"; label: string; target: string | null }
   | { type: "generating" }
   | { type: "citations"; citations: import("@nest/shared").Citation[] }
   | { type: "thinking"; content: string }
