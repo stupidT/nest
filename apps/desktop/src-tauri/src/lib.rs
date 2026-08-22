@@ -14,6 +14,8 @@ mod http;
 mod hub;
 mod indexer;
 mod indexing;
+mod knowledge_review;
+mod knowledge_workspace;
 mod retrieval;
 mod snapshot;
 mod state;

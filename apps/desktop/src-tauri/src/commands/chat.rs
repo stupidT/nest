@@ -4,7 +4,6 @@ use crate::chat_events;
 use crate::chat_runtime;
 use crate::db::{self, ChatMessage, ChatSession};
 use crate::error::AppResult;
-use crate::indexing;
 use crate::state::SharedState;
 use tauri::AppHandle;
 use tauri::{Emitter, State};
@@ -124,45 +123,14 @@ pub fn chat_review_file_change(
     change_id: String,
     approve: bool,
 ) -> AppResult<()> {
-    let change = {
-        let conn = state.db.lock();
-        db::get_chat_file_change(&conn, &change_id)?
-    };
-    if change.status != "pending" {
-        return Err(crate::error::AppError::msg(
-            "File change is no longer pending",
-        ));
-    }
-    if approve {
-        let context = crate::agent_tools::AgentToolContext::new(
-            state.inner().clone(),
-            app,
-            String::new(),
-            Vec::new(),
-        );
-        context.apply_change(&change)?;
-        let result = {
-            let conn = state.db.lock();
-            db::set_chat_file_change_status(&conn, &change_id, "approved")
-        };
-        if let Err(error) = result {
-            crate::agent_tools::rollback_changes(
-                state.inner(),
-                &[db::NewChatFileChange {
-                    path: change.path,
-                    operation: change.operation,
-                    old_content: change.old_content,
-                    new_content: change.new_content,
-                }],
-            );
-            return Err(error);
+    match crate::knowledge_review::KnowledgeReview::review(&state, &change_id, approve)? {
+        crate::knowledge_review::ReviewOutcome::Approved => Ok(()),
+        crate::knowledge_review::ReviewOutcome::Rejected => Ok(()),
+        crate::knowledge_review::ReviewOutcome::Failed { code, message } => {
+            let _ = app;
+            Err(crate::error::AppError::msg(format!("{code}: {message}")))
         }
-        indexing::schedule(state.inner())?;
-    } else {
-        let conn = state.db.lock();
-        db::set_chat_file_change_status(&conn, &change_id, "rejected")?;
     }
-    Ok(())
 }
 
 #[tauri::command]

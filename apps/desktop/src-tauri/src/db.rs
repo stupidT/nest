@@ -561,6 +561,27 @@ fn ensure_chat_file_change_columns(conn: &Connection) -> AppResult<()> {
             [],
         )?;
     }
+    if !table_has_column(conn, "chat_file_changes", "claim_id")? {
+        conn.execute("ALTER TABLE chat_file_changes ADD COLUMN claim_id TEXT", [])?;
+        conn.execute(
+            "ALTER TABLE chat_file_changes ADD COLUMN claim_kind TEXT",
+            [],
+        )?;
+        conn.execute(
+            "ALTER TABLE chat_file_changes ADD COLUMN claimed_at TEXT",
+            [],
+        )?;
+    }
+    if !table_has_column(conn, "chat_file_changes", "failure_code")? {
+        conn.execute(
+            "ALTER TABLE chat_file_changes ADD COLUMN failure_code TEXT",
+            [],
+        )?;
+        conn.execute(
+            "ALTER TABLE chat_file_changes ADD COLUMN failure_message TEXT",
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -2126,6 +2147,46 @@ pub fn set_chat_file_change_status(
             "File change is no longer pending",
         ));
     }
+    Ok(())
+}
+
+pub fn claim_chat_file_change(conn: &Connection, change_id: &str, claim_id: &str) -> AppResult<()> {
+    let changed = conn.execute(
+        "UPDATE chat_file_changes
+         SET status = 'applying', claim_id = ?1, claim_kind = 'apply', claimed_at = ?2
+         WHERE id = ?3 AND status = 'pending'",
+        params![claim_id, Utc::now().to_rfc3339(), change_id],
+    )?;
+    if changed == 0 {
+        return Err(crate::error::AppError::msg(
+            "File change is no longer pending",
+        ));
+    }
+    Ok(())
+}
+
+pub fn fail_chat_file_change(
+    conn: &Connection,
+    change_id: &str,
+    failure_code: &str,
+    failure_message: &str,
+) -> AppResult<()> {
+    conn.execute(
+        "UPDATE chat_file_changes
+         SET status = 'failed', failure_code = ?1, failure_message = ?2, claim_id = NULL
+         WHERE id = ?3 AND status IN ('pending', 'applying')",
+        params![failure_code, failure_message, change_id],
+    )?;
+    Ok(())
+}
+
+pub fn clear_chat_file_change_claim(conn: &Connection, change_id: &str) -> AppResult<()> {
+    conn.execute(
+        "UPDATE chat_file_changes
+         SET claim_id = NULL, claim_kind = NULL
+         WHERE id = ?1",
+        params![change_id],
+    )?;
     Ok(())
 }
 
