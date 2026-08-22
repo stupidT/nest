@@ -494,7 +494,14 @@ export type ChatFileChangeDetail = ChatFileChangeSummary & {
 export type ChatBackend = "nest" | "claude";
 export type ChatBackendStatus = "uninitialized" | "ready" | "unresumable";
 
-export type ChatSessionTitleSource = "placeholder" | "llm" | "manual";
+export type ModelSelectionKind = "default" | "explicit";
+
+export type ModelSelection = {
+  kind: ModelSelectionKind;
+  value: string | null;
+};
+
+export type ChatSessionTitleSource = "placeholder" | "llm" | "manual" | "local";
 
 export type ChatSession = {
   id: string;
@@ -507,6 +514,9 @@ export type ChatSession = {
   updated_at: string;
   backend: ChatBackend | null;
   backend_status: ChatBackendStatus;
+  selected_backend_id: ChatBackend | null;
+  selected_model: ModelSelection;
+  selection_revision: number;
 };
 
 export type IndexStatus = {
