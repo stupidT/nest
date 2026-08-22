@@ -120,6 +120,7 @@ const messages: Record<Locale, MessageTree> = {
           "Apply your changes with Save for them to take effect in chat.",
         stale: "Settings changed since the last test",
         statusConnected: "Connected",
+        statusDisabled: "Claude Agent disabled",
         statusLastConnected: "Last connected",
         statusDisconnected: "Not connected",
         resolvedPath: "Resolved CLI",
