@@ -1297,9 +1297,19 @@ pub fn set_session_backend_status(
         .ok_or_else(|| crate::error::AppError::msg(format!("Session not found: {session_id}")))
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaudeConnectionStatus {
+    Disabled,
+    Connected,
+    LastConnected,
+    #[default]
+    Unavailable,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ClaudeConnectionReport {
-    pub connected: bool,
+    pub status: ClaudeConnectionStatus,
     pub configured_cli_path: String,
     pub resolved_cli_path: String,
     pub cli_version: String,
@@ -1309,9 +1319,53 @@ pub struct ClaudeConnectionReport {
 }
 
 impl ClaudeConnectionReport {
-    pub fn is_connected(&self, current_cli_path: &str) -> bool {
-        self.connected && self.configured_cli_path == current_cli_path.trim()
+    pub fn matches_configured(&self, current_cli_path: &str) -> bool {
+        self.configured_cli_path == current_cli_path.trim()
     }
+}
+
+const CLAUDE_CONNECTION_REPORT_KEY: &str = "claude_connection_report_v1";
+
+pub fn save_claude_connection_report(
+    conn: &Connection,
+    report: &ClaudeConnectionReport,
+) -> AppResult<()> {
+    conn.execute(
+        "INSERT INTO settings(key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![CLAUDE_CONNECTION_REPORT_KEY, serde_json::to_string(report)?],
+    )?;
+    Ok(())
+}
+
+pub fn load_claude_connection_report(conn: &Connection) -> Option<ClaudeConnectionReport> {
+    conn.query_row(
+        "SELECT value FROM settings WHERE key = ?1",
+        params![CLAUDE_CONNECTION_REPORT_KEY],
+        |row| row.get::<_, String>(0),
+    )
+    .ok()
+    .and_then(|value| serde_json::from_str(&value).ok())
+}
+
+pub fn connection_proven_from(
+    enabled: bool,
+    configured_cli_path: &str,
+    memory: Option<&ClaudeConnectionReport>,
+    persisted: Option<&ClaudeConnectionReport>,
+) -> bool {
+    if !enabled {
+        return false;
+    }
+    if let Some(report) = memory {
+        if report.matches_configured(configured_cli_path) {
+            return report.status == ClaudeConnectionStatus::Connected;
+        }
+    }
+    persisted.is_some_and(|report| {
+        report.status == ClaudeConnectionStatus::Connected
+            && report.matches_configured(configured_cli_path)
+    })
 }
 
 #[allow(dead_code)]
@@ -2396,6 +2450,78 @@ mod chat_backend_tests {
         assert!(!settings.claude_agent_enabled);
         assert!(settings.claude_cli_path.is_empty());
         assert!(settings.claude_custom_models.is_empty());
+    }
+
+    #[test]
+    fn claude_connection_report_round_trips() {
+        let conn = migrated_db();
+        assert!(load_claude_connection_report(&conn).is_none());
+        let report = ClaudeConnectionReport {
+            status: ClaudeConnectionStatus::Connected,
+            configured_cli_path: "C:\\claude\\claude.exe".into(),
+            resolved_cli_path: "C:\\claude\\wrapper.cjs".into(),
+            cli_version: "2.1.238".into(),
+            effective_model: "glm-5.3[1m]".into(),
+            tested_at: "2026-01-01T00:00:00Z".into(),
+            message: None,
+        };
+        save_claude_connection_report(&conn, &report).unwrap();
+        assert_eq!(load_claude_connection_report(&conn), Some(report));
+    }
+
+    #[test]
+    fn connection_proof_requires_enabled_and_matching_path() {
+        let connected = ClaudeConnectionReport {
+            status: ClaudeConnectionStatus::Connected,
+            configured_cli_path: "C:\\claude\\claude.exe".into(),
+            ..Default::default()
+        };
+        assert!(connection_proven_from(
+            true,
+            "C:\\claude\\claude.exe",
+            Some(&connected),
+            None
+        ));
+        assert!(!connection_proven_from(
+            false,
+            "C:\\claude\\claude.exe",
+            Some(&connected),
+            None
+        ));
+        assert!(!connection_proven_from(
+            true,
+            "D:\\other\\claude.exe",
+            Some(&connected),
+            None
+        ));
+        assert!(connection_proven_from(
+            true,
+            "C:\\claude\\claude.exe",
+            None,
+            Some(&connected)
+        ));
+        let unavailable = ClaudeConnectionReport {
+            status: ClaudeConnectionStatus::Unavailable,
+            configured_cli_path: "C:\\claude\\claude.exe".into(),
+            ..Default::default()
+        };
+        assert!(!connection_proven_from(
+            true,
+            "C:\\claude\\claude.exe",
+            Some(&unavailable),
+            Some(&connected)
+        ));
+        let last_connected = ClaudeConnectionReport {
+            status: ClaudeConnectionStatus::LastConnected,
+            configured_cli_path: "C:\\claude\\claude.exe".into(),
+            ..Default::default()
+        };
+        assert!(!connection_proven_from(
+            true,
+            "C:\\claude\\claude.exe",
+            Some(&last_connected),
+            None
+        ));
     }
 
     #[test]

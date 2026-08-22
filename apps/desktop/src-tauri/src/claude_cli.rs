@@ -530,7 +530,8 @@ fn spawn_command(detection: &ClaudeDetection, args: &[String]) -> tokio::process
     command
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
     command
 }
 
@@ -597,25 +598,76 @@ async fn read_capped<R: tokio::io::AsyncRead + Unpin>(
     String::from_utf8_lossy(&buffer).to_string()
 }
 
+const KILL_TREE_TIMEOUT: Duration = Duration::from_secs(5);
+const REAP_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[cfg(windows)]
-fn kill_process_tree(child: &mut tokio::process::Child) {
+async fn kill_tree(child: &mut tokio::process::Child) {
     if let Some(pid) = child.id() {
-        let _ = std::process::Command::new("taskkill")
-            .args(["/T", "/F", "/PID", &pid.to_string()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
+        let _ = tokio::time::timeout(KILL_TREE_TIMEOUT, async {
+            let _ = tokio::process::Command::new("taskkill")
+                .args(["/T", "/F", "/PID", &pid.to_string()])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .await;
+        })
+        .await;
     }
 }
 
 #[cfg(not(windows))]
-fn kill_process_tree(child: &mut tokio::process::Child) {
+async fn kill_tree(child: &mut tokio::process::Child) {
     let _ = child.start_kill();
 }
 
-async fn kill_and_reap(child: &mut tokio::process::Child) {
-    kill_process_tree(child);
-    let _ = child.wait().await;
+struct ChildGuard {
+    child: tokio::process::Child,
+}
+
+impl ChildGuard {
+    fn spawn(mut command: tokio::process::Command) -> std::io::Result<Self> {
+        Ok(Self {
+            child: command.spawn()?,
+        })
+    }
+
+    fn take_stdin(&mut self) -> Option<tokio::process::ChildStdin> {
+        self.child.stdin.take()
+    }
+
+    fn take_stdout(&mut self) -> Option<tokio::process::ChildStdout> {
+        self.child.stdout.take()
+    }
+
+    fn take_stderr(&mut self) -> Option<tokio::process::ChildStderr> {
+        self.child.stderr.take()
+    }
+
+    async fn write_stdin_all(&mut self, bytes: &[u8]) -> Result<(), String> {
+        if let Some(mut stdin) = self.child.stdin.take() {
+            if let Err(error) = stdin.write_all(bytes).await {
+                return Err(format!("prompt write failed: {error}"));
+            }
+            let _ = stdin.shutdown().await;
+        }
+        Ok(())
+    }
+
+    async fn terminate(&mut self) {
+        kill_tree(&mut self.child).await;
+        if tokio::time::timeout(REAP_TIMEOUT, self.child.wait())
+            .await
+            .is_err()
+        {
+            let _ = self.child.start_kill();
+            let _ = tokio::time::timeout(REAP_TIMEOUT, self.child.wait()).await;
+        }
+    }
+
+    async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        self.child.wait().await
+    }
 }
 
 async fn cancel_notify(cancel: &CancelToken) {
@@ -626,24 +678,30 @@ async fn cancel_notify(cancel: &CancelToken) {
 
 #[allow(dead_code)]
 pub async fn probe_version(detection: &ClaudeDetection, timeout: Duration) -> ProbeOutcome {
-    let mut command = spawn_command(detection, &version_args());
-    let mut child = match command.spawn() {
-        Ok(child) => child,
+    let command = spawn_command(detection, &version_args());
+    let mut guard = match ChildGuard::spawn(command) {
+        Ok(guard) => guard,
         Err(error) => {
             return ProbeOutcome::Failed(ProbeFailure::Spawn {
                 message: error.to_string(),
             })
         }
     };
-    drop(child.stdin.take());
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    let stdout_task = tokio::spawn(read_capped(stdout, MAX_PROBE_OUTPUT_BYTES, Keep::Head));
-    let stderr_task = tokio::spawn(read_capped(stderr, MAX_STDERR_BYTES, Keep::Tail));
-    let status = match tokio::time::timeout(timeout, child.wait()).await {
+    drop(guard.take_stdin());
+    let stdout_task = tokio::spawn(read_capped(
+        guard.take_stdout(),
+        MAX_PROBE_OUTPUT_BYTES,
+        Keep::Head,
+    ));
+    let stderr_task = tokio::spawn(read_capped(
+        guard.take_stderr(),
+        MAX_STDERR_BYTES,
+        Keep::Tail,
+    ));
+    let status = match tokio::time::timeout(timeout, guard.wait()).await {
         Ok(status) => status,
         Err(_) => {
-            kill_and_reap(&mut child).await;
+            guard.terminate().await;
             let _ = stdout_task.await;
             let _ = stderr_task.await;
             return ProbeOutcome::Failed(ProbeFailure::Timeout);
@@ -686,22 +744,20 @@ pub async fn probe_connection(
     ];
     let mut command = spawn_command(detection, &args);
     command.current_dir(cwd);
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("spawn failed: {error}"))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(b"ok")
-            .await
-            .map_err(|error| format!("prompt write failed: {error}"))?;
-        let _ = stdin.shutdown().await;
-    }
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "no stdout pipe".to_string())?;
-    let stderr = child.stderr.take();
-    let stderr_task = tokio::spawn(read_capped(stderr, MAX_STDERR_BYTES, Keep::Tail));
+    let mut guard = ChildGuard::spawn(command).map_err(|error| format!("spawn failed: {error}"))?;
+
+    let stdout = match guard.take_stdout() {
+        Some(stdout) => stdout,
+        None => {
+            guard.terminate().await;
+            return Err("no stdout pipe".to_string());
+        }
+    };
+    let stderr_task = tokio::spawn(read_capped(
+        guard.take_stderr(),
+        MAX_STDERR_BYTES,
+        Keep::Tail,
+    ));
 
     let (line_tx, mut line_rx) = tokio::sync::mpsc::channel::<String>(STDOUT_CHANNEL_CAPACITY);
     let stdout_task = tokio::spawn(async move {
@@ -712,6 +768,14 @@ pub async fn probe_connection(
             }
         }
     });
+
+    if let Err(message) = guard.write_stdin_all(b"ok").await {
+        guard.terminate().await;
+        drop(line_rx);
+        let _ = stdout_task.await;
+        let _ = stderr_task.await;
+        return Err(message);
+    }
 
     let mut parser = StreamParser::new(probe_session_id);
     let deadline = tokio::time::Instant::now() + timeout;
@@ -737,16 +801,16 @@ pub async fn probe_connection(
         }
     };
     if let Err(message) = outcome {
-        kill_and_reap(&mut child).await;
+        guard.terminate().await;
         drop(line_rx);
         let _ = stdout_task.await;
         let _ = stderr_task.await;
         return Err(message);
     }
-    let status = match tokio::time::timeout(Duration::from_secs(30), child.wait()).await {
+    let status = match tokio::time::timeout(Duration::from_secs(30), guard.wait()).await {
         Ok(status) => status,
         Err(_) => {
-            kill_and_reap(&mut child).await;
+            guard.terminate().await;
             drop(line_rx);
             let _ = stdout_task.await;
             let _ = stderr_task.await;
@@ -833,49 +897,49 @@ async fn execute_single_turn(
     let args = turn_args(request.mode, request.session_id);
     let mut command = spawn_command(detection, &args);
     command.current_dir(request.vault_root);
-    let mut child = command
-        .spawn()
-        .map_err(|error| ClaudeTurnError::SpawnFailed {
-            message: error.to_string(),
-        })?;
+    let mut guard = ChildGuard::spawn(command).map_err(|error| ClaudeTurnError::SpawnFailed {
+        message: error.to_string(),
+    })?;
 
-    if let Some(stdin) = child.stdin.take() {
-        let mut stdin = stdin;
-        let write_fut = async {
-            stdin.write_all(request.prompt.as_bytes()).await?;
-            stdin.shutdown().await
-        };
-        tokio::pin!(write_fut);
-        let outcome = tokio::select! {
-            biased;
-            _ = cancel_notify(cancel) => None,
-            result = &mut write_fut => Some(result),
-        };
-        match outcome {
-            None => {
-                kill_and_reap(&mut child).await;
-                return Err(ClaudeTurnError::Cancelled);
+    {
+        let stdin = guard.take_stdin();
+        if let Some(mut stdin) = stdin {
+            let write_fut = async {
+                stdin.write_all(request.prompt.as_bytes()).await?;
+                stdin.shutdown().await
+            };
+            tokio::pin!(write_fut);
+            let outcome = tokio::select! {
+                biased;
+                _ = cancel_notify(cancel) => None,
+                result = &mut write_fut => Some(result),
+            };
+            match outcome {
+                None => {
+                    guard.terminate().await;
+                    return Err(ClaudeTurnError::Cancelled);
+                }
+                Some(Err(error)) => {
+                    guard.terminate().await;
+                    return Err(ClaudeTurnError::Io {
+                        message: error.to_string(),
+                    });
+                }
+                Some(Ok(())) => {}
             }
-            Some(Err(error)) => {
-                kill_and_reap(&mut child).await;
-                return Err(ClaudeTurnError::Io {
-                    message: error.to_string(),
-                });
-            }
-            Some(Ok(())) => {}
         }
     }
 
-    let stdout = match child.stdout.take() {
+    let stdout = match guard.take_stdout() {
         Some(stdout) => stdout,
         None => {
-            kill_and_reap(&mut child).await;
+            guard.terminate().await;
             return Err(ClaudeTurnError::Io {
                 message: "no stdout pipe".to_string(),
             });
         }
     };
-    let stderr = child.stderr.take();
+    let stderr = guard.take_stderr();
 
     let (line_tx, mut line_rx) = tokio::sync::mpsc::channel::<String>(STDOUT_CHANNEL_CAPACITY);
     let stdout_task = tokio::spawn(async move {
@@ -927,7 +991,7 @@ async fn execute_single_turn(
     }
 
     if let Some(error) = abort {
-        kill_and_reap(&mut child).await;
+        guard.terminate().await;
         drop(line_rx);
         let _ = stdout_task.await;
         let _ = stderr_task.await;
@@ -937,13 +1001,13 @@ async fn execute_single_turn(
     let status = tokio::select! {
         biased;
         _ = cancel_notify(cancel) => {
-            kill_and_reap(&mut child).await;
+            guard.terminate().await;
             drop(line_rx);
             let _ = stdout_task.await;
             let _ = stderr_task.await;
             return Err(ClaudeTurnError::Cancelled);
         }
-        status = child.wait() => status,
+        status = guard.wait() => status,
     };
     let exit_ok = matches!(&status, Ok(status) if status.success());
     let stderr_tail = stderr_task.await.unwrap_or_default();

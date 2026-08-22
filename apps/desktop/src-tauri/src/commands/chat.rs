@@ -191,25 +191,47 @@ pub async fn chat_send(
     }
     let app_data_dir = state.app_data_dir.clone();
 
-    let claude_available = chat_runtime::claude_available(&settings);
-    let claude_connected = claude_available
-        && state
-            .claude_connection
-            .lock()
-            .as_ref()
-            .is_some_and(|report| report.is_connected(&settings.claude_cli_path));
-    if claude_available && !claude_connected {
-        return Err(crate::error::AppError::msg(
-            "claude_unavailable: test the Claude connection in Settings before chatting",
-        ));
+    let existing_session = {
+        let conn = state.db.lock();
+        db::get_session(&conn, &session_id)?.ok_or_else(|| {
+            crate::error::AppError::msg(format!("Session not found: {session_id}"))
+        })?
+    };
+
+    if existing_session.backend == Some(db::ChatBackend::Claude) {
+        if existing_session.backend_status == db::ChatBackendStatus::Unresumable {
+            return Err(crate::error::AppError::msg(
+                "claude_session_unresumable: this Claude conversation can no longer be resumed; start a new chat",
+            ));
+        }
+        if !settings.claude_agent_enabled {
+            return Err(crate::error::AppError::msg(
+                "claude_disabled: re-enable Claude Agent in Settings to continue this chat",
+            ));
+        }
+        if !crate::commands::claude_connection_proven(&state, &settings) {
+            return Err(crate::error::AppError::msg(
+                "claude_unavailable: fix the Claude connection in Settings to continue this chat",
+            ));
+        }
     }
 
-    // Atomically bind the backend (if unbound) and persist the user turn.
-    let requested_backend = if claude_connected {
-        db::ChatBackend::Claude
-    } else {
-        db::ChatBackend::Nest
+    let requested_backend = match existing_session.backend {
+        Some(backend) => backend,
+        None => {
+            if settings.claude_agent_enabled {
+                if !crate::commands::claude_connection_proven(&state, &settings) {
+                    return Err(crate::error::AppError::msg(
+                        "claude_unavailable: test the Claude connection in Settings before chatting",
+                    ));
+                }
+                db::ChatBackend::Claude
+            } else {
+                db::ChatBackend::Nest
+            }
+        }
     };
+
     let prepared = {
         let mut conn = state.db.lock();
         db::bind_backend_and_insert_user_message(&mut conn, &session_id, requested_backend, &query)?

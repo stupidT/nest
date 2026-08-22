@@ -1,5 +1,5 @@
 use crate::claude_cli::{self, ClaudeDetection, ClaudeErrorCode, ProbeOutcome};
-use crate::db::{self, ClaudeConnectionReport};
+use crate::db::{self, ClaudeConnectionReport, ClaudeConnectionStatus};
 use crate::error::{AppError, AppResult};
 use crate::state::SharedState;
 use chrono::Utc;
@@ -62,12 +62,8 @@ fn spawn_strategy_name(target: &claude_cli::ClaudeLaunchTarget) -> String {
 }
 
 #[tauri::command]
-pub async fn claude_test_connection(
-    _state: State<'_, SharedState>,
-    cli_path: String,
-) -> AppResult<ClaudeConnectionReport> {
-    let report = test_connection(&cli_path).await;
-    Ok(report)
+pub async fn claude_test_connection(cli_path: String) -> AppResult<ClaudeConnectionReport> {
+    Ok(test_connection(&cli_path).await)
 }
 
 #[tauri::command]
@@ -85,14 +81,18 @@ pub async fn claude_save_settings(
         )?;
     }
     if !request.enabled {
-        state.claude_connection.lock().take();
+        *state.claude_connection.lock() = None;
         return Ok(ClaudeConnectionReport {
-            connected: false,
-            configured_cli_path: request.cli_path,
+            status: ClaudeConnectionStatus::Disabled,
+            configured_cli_path: request.cli_path.trim().to_string(),
             ..Default::default()
         });
     }
     let report = test_connection(&request.cli_path).await;
+    if report.status == ClaudeConnectionStatus::Connected {
+        let conn = state.db.lock();
+        db::save_claude_connection_report(&conn, &report)?;
+    }
     *state.claude_connection.lock() = Some(report.clone());
     Ok(report)
 }
@@ -105,15 +105,47 @@ pub fn claude_connection_status(
         let conn = state.db.lock();
         db::get_settings(&conn)?
     };
-    let stored = state.claude_connection.lock().clone();
-    Ok(match stored {
-        Some(report) if report.is_connected(&settings.claude_cli_path) => report,
-        _ => ClaudeConnectionReport {
-            connected: false,
-            configured_cli_path: settings.claude_cli_path,
+    if !settings.claude_agent_enabled {
+        return Ok(ClaudeConnectionReport {
+            status: ClaudeConnectionStatus::Disabled,
+            configured_cli_path: settings.claude_cli_path.clone(),
             ..Default::default()
-        },
-    })
+        });
+    }
+    let configured = settings.claude_cli_path.trim();
+    if let Some(report) = state.claude_connection.lock().as_ref() {
+        if report.matches_configured(configured) {
+            return Ok(report.clone());
+        }
+    }
+    let persisted = {
+        let conn = state.db.lock();
+        db::load_claude_connection_report(&conn)
+    };
+    if let Some(mut report) = persisted {
+        if report.matches_configured(configured) {
+            report.status = ClaudeConnectionStatus::LastConnected;
+            return Ok(report);
+        }
+    }
+    Ok(unavailable_report(
+        configured,
+        "Run Test connection in Settings",
+    ))
+}
+
+pub fn claude_connection_proven(state: &SharedState, settings: &db::AppSettings) -> bool {
+    let memory = state.claude_connection.lock().clone();
+    let persisted = {
+        let conn = state.db.lock();
+        db::load_claude_connection_report(&conn)
+    };
+    db::connection_proven_from(
+        settings.claude_agent_enabled,
+        &settings.claude_cli_path,
+        memory.as_ref(),
+        persisted.as_ref(),
+    )
 }
 
 async fn test_connection(cli_path: &str) -> ClaudeConnectionReport {
@@ -125,9 +157,7 @@ async fn test_connection(cli_path: &str) -> ClaudeConnectionReport {
     };
     let detections = match claude_cli::detect_cli(configured.as_deref()) {
         Ok(detections) => detections,
-        Err(error) => {
-            return failure_report(trimmed, &error.to_string());
-        }
+        Err(error) => return unavailable_report(trimmed, &error.to_string()),
     };
 
     for detection in &detections {
@@ -140,7 +170,7 @@ async fn test_connection(cli_path: &str) -> ClaudeConnectionReport {
             ProbeOutcome::Failed(_) => continue,
         }
     }
-    failure_report(trimmed, "no CLI candidate completed the connection test")
+    unavailable_report(trimmed, "no CLI candidate completed the connection test")
 }
 
 async fn minimal_round_trip(
@@ -154,7 +184,7 @@ async fn minimal_round_trip(
             .await;
     match outcome {
         Ok(result) => Some(ClaudeConnectionReport {
-            connected: true,
+            status: ClaudeConnectionStatus::Connected,
             configured_cli_path: configured_path.to_string(),
             resolved_cli_path: result.resolved_path,
             cli_version: result.cli_version,
@@ -162,13 +192,13 @@ async fn minimal_round_trip(
             tested_at: Utc::now().to_rfc3339(),
             message: None,
         }),
-        Err(message) => Some(failure_report(configured_path, &message)),
+        Err(message) => Some(unavailable_report(configured_path, &message)),
     }
 }
 
-fn failure_report(cli_path: &str, message: &str) -> ClaudeConnectionReport {
+fn unavailable_report(cli_path: &str, message: &str) -> ClaudeConnectionReport {
     ClaudeConnectionReport {
-        connected: false,
+        status: ClaudeConnectionStatus::Unavailable,
         configured_cli_path: cli_path.to_string(),
         message: Some(message.to_string()),
         ..Default::default()
