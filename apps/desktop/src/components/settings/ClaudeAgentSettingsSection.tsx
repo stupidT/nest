@@ -43,6 +43,7 @@ function useClaudeAgentSettings(settingsQuery: {
   const [stale, setStale] = useState(false);
   const [detection, setDetection] = useState<ClaudeDetectionDto | null>(null);
   const [detectFailed, setDetectFailed] = useState(false);
+  const [testedModel, setTestedModel] = useState<string | null>(null);
 
   useEffect(() => {
     if (!settingsQuery.data || hydrated) return;
@@ -65,9 +66,15 @@ function useClaudeAgentSettings(settingsQuery: {
     queryKey: queryKeys.claudeModelOptions,
     queryFn: api.claudeModelOptions,
   });
-  const observedModels = (modelOptionsQuery.data ?? [])
+  const persistedObserved = (modelOptionsQuery.data ?? [])
     .filter((option) => option.source === "observed")
     .map((option) => option.model_id);
+  const observedModels = testedModel
+    ? [
+        testedModel,
+        ...persistedObserved.filter((model) => model !== testedModel),
+      ]
+    : persistedObserved;
 
   const serializedModels = serializeModelRows(modelRows);
   const dirty =
@@ -98,6 +105,11 @@ function useClaudeAgentSettings(settingsQuery: {
     onSuccess: (report) => {
       setTestResult(report);
       setDetectFailed(false);
+      setTestedModel(
+        report.status === "connected" && report.effective_model.trim()
+          ? report.effective_model.trim()
+          : null,
+      );
       void queryClient.invalidateQueries({
         queryKey: queryKeys.claudeModelOptions,
       });
@@ -120,9 +132,10 @@ function useClaudeAgentSettings(settingsQuery: {
       setTestResult(null);
       setStale(false);
       setDetectFailed(false);
+      setTestedModel(null);
       void queryClient.invalidateQueries({ queryKey: queryKeys.settings });
       void queryClient.invalidateQueries({
-        queryKey: queryKeys.claudeConnection,
+        queryKey: queryKeys.claudeModelOptions,
       });
       void queryClient.invalidateQueries({
         queryKey: queryKeys.claudeModelOptions,
@@ -151,6 +164,12 @@ function useClaudeAgentSettings(settingsQuery: {
         ? connectionQuery.data
         : null;
 
+  const clearDetection = () => {
+    setDetection(null);
+    setDetectFailed(false);
+    setTestedModel(null);
+  };
+
   return {
     draft,
     setDraft,
@@ -166,10 +185,7 @@ function useClaudeAgentSettings(settingsQuery: {
     detection,
     detectFailed,
     observedModels,
-    clearDetection: () => {
-      setDetection(null);
-      setDetectFailed(false);
-    },
+    clearDetection,
   };
 }
 
