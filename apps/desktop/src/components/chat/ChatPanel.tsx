@@ -16,6 +16,11 @@ import { MentionComposer, type MentionRef } from "@/components/chat/MentionCompo
 import { renderWithMentions } from "@/components/chat/mention-pill";
 import { collectMentionCandidates } from "@/lib/tree-mentions";
 import { claudeBackendNotice, claudeComposerGate } from "@/lib/claude-composer";
+import {
+  capsuleFromModelSelection,
+  deriveCapsules,
+  modelSelectionFromCapsule,
+} from "@/lib/chat-selection";
 import { MarkdownBody } from "@/components/markdown/MarkdownBody";
 import {
   Accordion,
@@ -62,6 +67,13 @@ export function ChatPanel() {
   const [chatError, setChatError] = useState<string | null>(null);
   const [isStopping, setIsStopping] = useState(false);
   const [completedTurn, setCompletedTurn] = useState(0);
+  const [pendingDraft, setPendingDraft] = useState<{
+    text: string;
+    refs: MentionRef[];
+  } | null>(null);
+  const composerDraftRef = useRef<{ text: string; refs: MentionRef[] } | null>(
+    null,
+  );
 
   const isGeneratingHere = isSending && pendingSessionId === sessionId;
 
@@ -151,6 +163,136 @@ export function ChatPanel() {
     queryFn: api.claudeConnectionStatus,
   });
   const claudeStatus = claudeConnectionQuery.data?.status ?? null;
+  const claudeEnabled = claudeStatus !== "disabled" && claudeStatus !== null;
+
+  const settingsQuery = useQuery({
+    queryKey: queryKeys.settings,
+    queryFn: api.settingsGet,
+  });
+  const modelOptionsQuery = useQuery({
+    queryKey: queryKeys.claudeModelOptions,
+    queryFn: api.claudeModelOptions,
+  });
+  const claudeModelIds = (modelOptionsQuery.data ?? [])
+    .filter((option) => option.source !== "default")
+    .map((option) => option.model_id)
+    .filter((model) => model.trim() !== "");
+
+  const capsules = deriveCapsules({
+    boundBackend: currentSession?.backend ?? null,
+    claudeEnabled,
+    claudeStatus,
+    claudeModelIds,
+    nestModelLabel: settingsQuery.data?.chat_model?.trim() || null,
+  });
+
+  const activeBackendId: string =
+    currentSession?.backend ?? currentSession?.selected_backend_id ?? "nest";
+  const activeModelId = capsuleFromModelSelection(
+    currentSession?.selected_model ?? { kind: "default", value: null },
+  );
+
+  const applySelection = (
+    patch: {
+      backendId?: string;
+      modelKind?: "default" | "explicit";
+      modelValue?: string | null;
+      mode?: ChatMode;
+    },
+    previousState: { text: string; refs: MentionRef[] } | null = null,
+  ) => {
+    if (!sessionId || isSending) return;
+    const revision = currentSession?.selection_revision ?? 0;
+    if (patch.backendId && currentSession?.backend != null) {
+      const draft = previousState ?? null;
+      void api
+        .chatCreateSession("New chat")
+        .then((created) => {
+          const createdRevision = created.selection_revision;
+          return api
+            .chatUpdateSelection(
+              created.id,
+              createdRevision,
+              patch.backendId
+                ? {
+                    backendId: patch.backendId,
+                    modelKind: patch.modelKind,
+                    modelValue: patch.modelValue,
+                    mode: patch.mode,
+                  }
+                : patch,
+            )
+            .then((updated) => {
+              queryClient.setQueryData<ChatSession[]>(
+                queryKeys.chatSessions,
+                (current) => [updated, ...(current ?? [])],
+              );
+              openChatTab(updated.id);
+              if (draft) {
+                setPendingDraft(draft);
+              }
+            });
+        })
+        .catch((e: unknown) =>
+          setStatusMessage(
+            appErrorMessage(e, "Could not start a new chat"),
+          ),
+        );
+      return;
+    }
+    void api
+      .chatUpdateSelection(sessionId, revision, patch)
+      .then((updated) => {
+        queryClient.setQueryData<ChatSession[]>(
+          queryKeys.chatSessions,
+          (current) =>
+            current?.map((session) =>
+              session.id === updated.id ? updated : session,
+            ),
+        );
+      })
+      .catch((e: unknown) => {
+        const message = e instanceof Error ? e.message : String(e);
+        if (message.includes("chat_selection_stale")) {
+          void queryClient.invalidateQueries({
+            queryKey: queryKeys.chatSessions,
+          });
+          setStatusMessage(
+            "Chat selection changed elsewhere. Review and send again.",
+          );
+          return;
+        }
+        setStatusMessage(appErrorMessage(e, "Could not update selection"));
+      });
+  };
+
+  const changeMode = (nextMode: ChatMode) => {
+    if (isSending || nextMode === mode) return;
+    applySelection({ mode: nextMode });
+  };
+
+  const changeBackend = (backendId: string) => {
+    if (backendId === activeBackendId) return;
+    if (currentSession?.backend != null) {
+      applySelection(
+        { backendId },
+        composerDraftRef.current
+          ? { text: composerDraftRef.current.text, refs: composerDraftRef.current.refs }
+          : null,
+      );
+      return;
+    }
+    applySelection({ backendId });
+  };
+
+  const changeModel = (modelId: string) => {
+    if (modelId === activeModelId) return;
+    const selection = modelSelectionFromCapsule(modelId);
+    applySelection({
+      modelKind: selection.kind,
+      modelValue: selection.value,
+    });
+  };
 
   const composerGate = claudeComposerGate(
     currentSession ? { backend: currentSession.backend, backend_status: currentSession.backend_status } : null,
@@ -208,15 +350,6 @@ export function ChatPanel() {
       setStatusMessage(appErrorMessage(e, "Could not reconnect Claude"));
     },
   });
-
-  const changeMode = (nextMode: ChatMode) => {
-    if (!sessionId || isSending || nextMode === mode) return;
-    void api.chatUpdateSession(sessionId, { mode: nextMode }).then((updated) => {
-      queryClient.setQueryData<ChatSession[]>(queryKeys.chatSessions, (current) =>
-        current?.map((session) => session.id === updated.id ? updated : session),
-      );
-    }).catch((error: unknown) => setStatusMessage(appErrorMessage(error, "Could not change chat mode")));
-  };
 
   // Called when navigating away from the current tab (new chat, switch, close).
   // Only clears streaming artifacts when nothing is in flight — an in-flight
@@ -309,15 +442,15 @@ export function ChatPanel() {
   const send = useMutation({
     mutationFn: async ({
       sessionId: targetSessionId,
+      expectedRevision,
       query,
       focusPaths,
-      mode,
       protectedPaths,
     }: {
       sessionId: string;
+      expectedRevision: number;
       query: string;
       focusPaths: string[];
-      mode: ChatMode;
       protectedPaths: string[];
     }) => {
       const eventName = `chat-stream-${Date.now()}`;
@@ -356,12 +489,19 @@ export function ChatPanel() {
       );
 
       try {
-        return await api.chatSend(targetSessionId, query, focusPaths, eventName, mode, protectedPaths);
+        return await api.chatSend(
+          targetSessionId,
+          expectedRevision,
+          query,
+          focusPaths,
+          eventName,
+          protectedPaths,
+        );
       } finally {
         unlisten();
       }
     },
-    onMutate: ({ sessionId: targetSessionId, query, mode }) => {
+    onMutate: ({ sessionId: targetSessionId, query }) => {
       setChatError(null);
       setPendingUser(query);
       setPendingSessionId(targetSessionId);
@@ -412,6 +552,21 @@ export function ChatPanel() {
     },
     onError: (error: unknown, vars) => {
       const message = appErrorMessage(error, "Chat request failed");
+      if (message.includes("chat_selection_stale")) {
+        setIsSending(false);
+        setIsStopping(false);
+        clearStream();
+        setPendingUser(null);
+        setAgentActivity(null);
+        setLiveFileActivities([]);
+        setPendingSessionId(null);
+        setAgentRunActive(false);
+        void queryClient.invalidateQueries({ queryKey: queryKeys.chatSessions });
+        setStatusMessage(
+          "Chat selection changed elsewhere. Review and send again.",
+        );
+        return;
+      }
       if (message.toLowerCase().includes("cancelled")) {
         setIsSending(false);
         setIsStopping(false);
@@ -638,14 +793,26 @@ export function ChatPanel() {
             if (!sessionId) return;
             send.mutate({
               sessionId,
+              expectedRevision: currentSession?.selection_revision ?? 0,
               query,
               focusPaths,
-              mode,
               protectedPaths: Array.from(useEditorStore.getState().editingPaths),
             });
           }}
           mode={mode}
           onModeChange={changeMode}
+          backends={capsules.backends}
+          models={capsules.models}
+          activeBackendId={activeBackendId}
+          activeModelId={activeModelId}
+          canChangeBackend={capsules.canChangeBackend}
+          onBackendChange={changeBackend}
+          onModelChange={changeModel}
+          draft={pendingDraft}
+          onDraftConsumed={() => setPendingDraft(null)}
+          onDraftChange={(draft) => {
+            composerDraftRef.current = draft;
+          }}
           onStop={() => {
             if (isStopping) return;
             setIsStopping(true);

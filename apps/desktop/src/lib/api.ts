@@ -139,21 +139,36 @@ export const api = {
     invoke<ChatMessage[]>("chat_list_messages", { sessionId }),
   chatSend: (
     sessionId: string,
+    expectedRevision: number,
     query: string,
     focusPaths: string[],
     streamEvent: string,
-    mode: ChatMode,
     protectedPaths: string[],
   ) =>
     invoke<ChatMessage>("chat_send", {
       request: {
         sessionId,
+        expectedRevision,
         query,
         focusPaths,
         streamEvent,
-        mode,
         protectedPaths,
       },
+    }),
+  chatUpdateSelection: (
+    sessionId: string,
+    expectedRevision: number,
+    patch: {
+      backendId?: string;
+      modelKind?: "default" | "explicit";
+      modelValue?: string | null;
+      mode?: ChatMode;
+    },
+  ) =>
+    invoke<ChatSession>("chat_update_selection", {
+      sessionId,
+      expectedRevision,
+      patch,
     }),
   chatGetFileChange: (changeId: string) =>
     invoke<ChatFileChangeDetail>("chat_get_file_change", { changeId }),
