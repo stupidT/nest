@@ -4,6 +4,7 @@ mod chat_events;
 mod chat_history;
 mod chat_runtime;
 mod claude_cli;
+mod claude_mcp;
 mod commands;
 mod db;
 mod debug;

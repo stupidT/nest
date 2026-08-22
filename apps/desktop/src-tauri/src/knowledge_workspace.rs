@@ -157,6 +157,41 @@ enum StageRequirement {
 }
 
 impl KnowledgeWorkspace {
+    pub async fn search_turn(
+        state: &SharedState,
+        query: &str,
+        limit: Option<u32>,
+    ) -> KnowledgeResult<Vec<KnowledgeHit>> {
+        let limit = limit.unwrap_or(5).clamp(1, 20);
+        if query.trim().is_empty() {
+            return Err(invalid("query must not be empty"));
+        }
+        let prefixes = {
+            let conn = state.db.lock();
+            db::list_sync_state(&conn)
+                .map_err(|error| KnowledgeError::new("internal", error.to_string()))?
+                .into_iter()
+                .filter(|pack| pack.active)
+                .map(|pack| pack.local_path)
+                .collect::<Vec<_>>()
+        };
+        let citations =
+            crate::retrieval::retrieve(&state.app_data_dir, state, query, &prefixes, limit)
+                .await
+                .map_err(|error| {
+                    KnowledgeError::new("internal", format!("retrieval failed: {error}"))
+                })?;
+        Ok(citations
+            .into_iter()
+            .map(|citation| KnowledgeHit {
+                file_path: citation.file_path,
+                title: citation.title,
+                snippet: citation.snippet,
+                score: citation.score,
+            })
+            .collect())
+    }
+
     pub fn open_turn(
         state: SharedState,
         mode: CapabilityMode,
