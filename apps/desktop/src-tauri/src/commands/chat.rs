@@ -41,13 +41,42 @@ pub struct ChatSessionPatch {
 
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ChatSendRequest {
-    pub session_id: String,
-    pub query: String,
-    pub focus_paths: Option<Vec<String>>,
+pub struct ChatSelectionPatch {
+    pub backend_id: Option<String>,
+    pub model_kind: Option<String>,
+    pub model_value: Option<String>,
     pub mode: Option<String>,
-    pub protected_paths: Option<Vec<String>>,
-    pub stream_event: String,
+}
+
+#[tauri::command]
+pub fn chat_update_selection(
+    state: State<'_, SharedState>,
+    session_id: String,
+    expected_revision: u32,
+    patch: ChatSelectionPatch,
+) -> AppResult<ChatSession> {
+    let backend = match patch.backend_id.as_deref() {
+        Some(value) => Some(db::ChatBackend::parse(value)?),
+        None => None,
+    };
+    let model = match patch.model_kind.as_deref() {
+        Some(kind) => Some(db::ModelSelection::parse(
+            kind,
+            patch.model_value.as_deref(),
+        )?),
+        None => None,
+    };
+    let conn = state.db.lock();
+    db::update_session_selection(
+        &conn,
+        &session_id,
+        expected_revision,
+        db::SelectionPatch {
+            selected_backend_id: backend,
+            selected_model: model,
+            mode: patch.mode,
+        },
+    )
 }
 
 #[tauri::command]
@@ -164,6 +193,17 @@ pub fn chat_list_messages(
     Ok(messages)
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatSendRequest {
+    pub session_id: String,
+    pub expected_revision: u32,
+    pub query: String,
+    pub focus_paths: Option<Vec<String>>,
+    pub protected_paths: Option<Vec<String>>,
+    pub stream_event: String,
+}
+
 #[tauri::command]
 pub async fn chat_send(
     app: AppHandle,
@@ -172,9 +212,9 @@ pub async fn chat_send(
 ) -> AppResult<ChatMessage> {
     let ChatSendRequest {
         session_id,
+        expected_revision,
         query,
         focus_paths,
-        mode,
         protected_paths,
         stream_event,
     } = request;
@@ -183,12 +223,6 @@ pub async fn chat_send(
         db::get_settings(&conn)?
     };
     let focus = focus_paths.unwrap_or_default();
-    let mode = mode.unwrap_or_else(|| "ask".into());
-    if mode != "ask" && mode != "agent" {
-        return Err(crate::error::AppError::msg(
-            "Chat mode must be ask or agent",
-        ));
-    }
     let app_data_dir = state.app_data_dir.clone();
 
     let existing_session = {
@@ -214,29 +248,24 @@ pub async fn chat_send(
                 "claude_unavailable: fix the Claude connection in Settings to continue this chat",
             ));
         }
+    } else if existing_session.backend.is_none()
+        && existing_session.selected_backend_id.as_deref() == Some("claude")
+        && settings.claude_agent_enabled
+        && !crate::commands::claude_connection_proven(&state, &settings)
+    {
+        return Err(crate::error::AppError::msg(
+            "claude_unavailable: test the Claude connection in Settings before chatting",
+        ));
     }
-
-    let requested_backend = match existing_session.backend {
-        Some(backend) => backend,
-        None => {
-            if settings.claude_agent_enabled {
-                if !crate::commands::claude_connection_proven(&state, &settings) {
-                    return Err(crate::error::AppError::msg(
-                        "claude_unavailable: test the Claude connection in Settings before chatting",
-                    ));
-                }
-                db::ChatBackend::Claude
-            } else {
-                db::ChatBackend::Nest
-            }
-        }
-    };
 
     let prepared = {
         let mut conn = state.db.lock();
-        db::bind_backend_and_insert_user_message(&mut conn, &session_id, requested_backend, &query)?
+        db::begin_chat_turn(&mut conn, &session_id, expected_revision, &query)?
     };
     let session = prepared.session;
+    let turn_id = prepared.turn_id.clone();
+    let turn_backend = prepared.backend;
+    let turn_mode = prepared.mode.clone();
 
     let prior = {
         let conn = state.db.lock();
@@ -253,8 +282,9 @@ pub async fn chat_send(
 
     crate::nest_debug!(
         "chat",
-        "chat_send session={session_id} backend={:?} query_len={} focus={:?}",
+        "chat_send session={session_id} backend={:?} model={:?} mode={turn_mode} query_len={} focus={:?}",
         session.backend,
+        prepared.requested_model.cli_model_arg(),
         query.len(),
         focus
     );
@@ -268,7 +298,8 @@ pub async fn chat_send(
         query: query.clone(),
         focus_paths: focus,
         prior_history: prior,
-        mode: mode.clone(),
+        mode: turn_mode,
+        requested_model: prepared.requested_model.clone(),
         protected_paths: protected_paths.unwrap_or_default(),
         stream_event: stream_event.clone(),
     })
@@ -277,7 +308,18 @@ pub async fn chat_send(
         Ok(v) => v,
         Err(e) => {
             crate::nest_debug!("chat", "chat_send failed: {e}");
-            // Soft-cancel: user stopped before any tokens arrived.
+            {
+                let conn = state.db.lock();
+                let _ = db::finish_chat_turn(
+                    &conn,
+                    &turn_id,
+                    "failed",
+                    None,
+                    None,
+                    Some("chat_failed"),
+                    Some(&e.to_string()),
+                );
+            }
             if e.to_string() == "cancelled" {
                 let _ = app.emit(
                     &stream_event,
@@ -324,6 +366,19 @@ pub async fn chat_send(
         )
     }?;
 
+    {
+        let conn = state.db.lock();
+        db::finish_chat_turn(
+            &conn,
+            &turn_id,
+            "succeeded",
+            result.effective_model.as_deref(),
+            Some(&message.id),
+            None,
+            None,
+        )?;
+    }
+
     let _ = app.emit(
         &stream_event,
         chat_events::ChatStreamEvent::Done {
@@ -331,7 +386,7 @@ pub async fn chat_send(
         },
     );
 
-    if session.backend == Some(db::ChatBackend::Nest) {
+    if turn_backend == db::ChatBackend::Nest {
         let state_clone = state.inner().clone();
         let sid = session_id.clone();
         let settings_for_title = settings.clone();

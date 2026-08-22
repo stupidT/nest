@@ -80,6 +80,7 @@ pub fn run() {
             commands::chat_get_or_create_initial_session,
             commands::chat_list_sessions,
             commands::chat_update_session,
+            commands::chat_update_selection,
             commands::chat_delete_session,
             commands::chat_list_messages,
             commands::chat_get_file_change,

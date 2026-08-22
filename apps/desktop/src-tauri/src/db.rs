@@ -309,9 +309,14 @@ pub struct ChatSession {
 }
 
 #[allow(dead_code)]
+#[derive(Debug)]
 pub struct PreparedChatTurn {
     pub session: ChatSession,
     pub user_message: ChatMessage,
+    pub turn_id: String,
+    pub backend: ChatBackend,
+    pub requested_model: ModelSelection,
+    pub mode: String,
 }
 
 pub const TITLE_SOURCE_PLACEHOLDER: &str = "placeholder";
@@ -1337,58 +1342,77 @@ pub fn set_session_title_llm(
     Ok(current)
 }
 
-#[allow(dead_code)]
-pub fn bind_backend_and_insert_user_message(
+pub fn begin_chat_turn(
     conn: &mut Connection,
     session_id: &str,
-    requested_backend: ChatBackend,
+    expected_revision: u32,
     content: &str,
 ) -> AppResult<PreparedChatTurn> {
     let tx = conn.transaction()?;
-    let existing_backend: Option<Option<String>> = tx
+    let row = tx
         .query_row(
-            "SELECT backend FROM chat_sessions WHERE id = ?1",
+            "SELECT backend, selected_backend_id, selected_model_kind, selected_model_value, mode,
+                    selection_revision, title_source
+             FROM chat_sessions WHERE id = ?1",
             params![session_id],
-            |row| row.get::<_, Option<String>>(0),
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, u32>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            },
         )
         .optional()?;
-    let Some(existing_backend) = existing_backend else {
+    let Some((backend, selected_backend_id, model_kind, model_value, mode, revision, title_source)) =
+        row
+    else {
         return Err(crate::error::AppError::msg(format!(
             "Session not found: {session_id}"
         )));
     };
+    if revision != expected_revision {
+        return Err(crate::error::AppError::msg("chat_selection_stale"));
+    }
+    let selected_model = match model_kind.as_deref() {
+        None => ModelSelection::default(),
+        Some(kind) => ModelSelection::parse(kind, model_value.as_deref())?,
+    };
 
-    match existing_backend {
-        Some(persisted) => {
-            ChatBackend::parse(&persisted)?;
-        }
+    let backend = match backend.as_deref() {
+        Some(persisted) => ChatBackend::parse(persisted)?,
         None => {
-            let initial_status = match requested_backend {
+            let requested = selected_backend_id
+                .as_deref()
+                .and_then(|value| ChatBackend::parse(value).ok())
+                .unwrap_or(ChatBackend::Nest);
+            let initial_status = match requested {
                 ChatBackend::Nest => ChatBackendStatus::Ready,
                 ChatBackend::Claude => ChatBackendStatus::Uninitialized,
             };
-            let changed = tx.execute(
+            tx.execute(
                 "UPDATE chat_sessions
-                 SET backend = ?1, backend_status = ?2
+                 SET backend = ?1, backend_status = ?2, selected_backend_id = ?1
                  WHERE id = ?3 AND backend IS NULL",
-                params![
-                    requested_backend.as_str(),
-                    initial_status.as_str(),
-                    session_id
-                ],
+                params![requested.as_str(), initial_status.as_str(), session_id],
             )?;
-            if changed == 0 {
-                let winner: String = tx.query_row(
-                    "SELECT backend FROM chat_sessions WHERE id = ?1",
-                    params![session_id],
-                    |row| row.get(0),
+            if title_source == TITLE_SOURCE_PLACEHOLDER && requested == ChatBackend::Claude {
+                let title = local_session_title(content);
+                tx.execute(
+                    "UPDATE chat_sessions SET title = ?1, title_source = ?2 WHERE id = ?3",
+                    params![title, TITLE_SOURCE_LOCAL, session_id],
                 )?;
-                ChatBackend::parse(&winner)?;
             }
+            requested
         }
-    }
+    };
 
     let message_id = Uuid::new_v4().to_string();
+    let turn_id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     tx.execute(
         "INSERT INTO chat_messages (id, session_id, role, content, citations_json, thinking, thinking_seconds, created_at)
@@ -1398,6 +1422,25 @@ pub fn bind_backend_and_insert_user_message(
     tx.execute(
         "UPDATE chat_sessions SET updated_at = ?1 WHERE id = ?2",
         params![now, session_id],
+    )?;
+    tx.execute(
+        "INSERT INTO chat_turns (id, session_id, user_message_id, backend_id,
+            requested_model_kind, requested_model_value, mode, selection_revision, status, started_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'running', ?9)",
+        params![
+            turn_id,
+            session_id,
+            message_id,
+            backend.as_str(),
+            match selected_model.kind {
+                ModelSelectionKind::Default => "default",
+                ModelSelectionKind::Explicit => "explicit",
+            },
+            selected_model.value,
+            mode,
+            revision,
+            now
+        ],
     )?;
     tx.commit()?;
 
@@ -1415,7 +1458,38 @@ pub fn bind_backend_and_insert_user_message(
             file_changes: Vec::new(),
             created_at: now,
         },
+        turn_id,
+        backend,
+        requested_model: selected_model,
+        mode,
     })
+}
+
+pub fn finish_chat_turn(
+    conn: &Connection,
+    turn_id: &str,
+    status: &str,
+    effective_model: Option<&str>,
+    assistant_message_id: Option<&str>,
+    error_code: Option<&str>,
+    error_message: Option<&str>,
+) -> AppResult<()> {
+    conn.execute(
+        "UPDATE chat_turns
+         SET status = ?1, effective_model = ?2, error_code = ?3, error_message = ?4,
+             assistant_message_id = ?5, finished_at = ?6
+         WHERE id = ?7 AND status = 'running'",
+        params![
+            status,
+            effective_model,
+            error_code,
+            error_message,
+            assistant_message_id,
+            Utc::now().to_rfc3339(),
+            turn_id
+        ],
+    )?;
+    Ok(())
 }
 
 #[allow(dead_code)]
@@ -1617,6 +1691,148 @@ pub fn normalize_claude_custom_models(input: &str) -> String {
         }
     }
     lines.join("\n")
+}
+
+pub const TITLE_SOURCE_LOCAL: &str = "local";
+
+pub fn local_session_title(first_user_message: &str) -> String {
+    let collapsed: String = first_user_message
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let trimmed = collapsed.trim();
+    if trimmed.is_empty() {
+        return "New chat".to_string();
+    }
+    let count = trimmed.chars().count();
+    if count <= 48 {
+        return trimmed.to_string();
+    }
+    let mut shown: String = trimmed.chars().take(48).collect();
+    shown.push('…');
+    shown
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SelectionPatch {
+    pub selected_backend_id: Option<ChatBackend>,
+    pub selected_model: Option<ModelSelection>,
+    pub mode: Option<String>,
+}
+
+pub fn update_session_selection(
+    conn: &Connection,
+    session_id: &str,
+    expected_revision: u32,
+    patch: SelectionPatch,
+) -> AppResult<ChatSession> {
+    let current = get_session(conn, session_id)?
+        .ok_or_else(|| crate::error::AppError::msg(format!("Session not found: {session_id}")))?;
+    if current.selection_revision != expected_revision {
+        return Err(crate::error::AppError::msg("chat_selection_stale"));
+    }
+    if let Some(mode) = patch.mode.as_deref() {
+        if mode != "ask" && mode != "agent" {
+            return Err(crate::error::AppError::msg("Invalid chat mode"));
+        }
+    }
+    let mut selected_backend_id = current.selected_backend_id.clone();
+    if let Some(backend) = patch.selected_backend_id {
+        if current.backend.is_some() {
+            return Err(crate::error::AppError::msg(
+                "chat_backend_bound: create a new chat to switch backends",
+            ));
+        }
+        selected_backend_id = Some(backend.as_str().to_string());
+    }
+    let selected_model = patch.selected_model.unwrap_or(current.selected_model);
+    let mode = patch.mode.unwrap_or(current.mode);
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE chat_sessions
+         SET selected_backend_id = ?1, selected_model_kind = ?2, selected_model_value = ?3,
+             mode = ?4, selection_revision = selection_revision + 1, updated_at = ?5
+         WHERE id = ?6 AND selection_revision = ?7",
+        params![
+            selected_backend_id,
+            match selected_model.kind {
+                ModelSelectionKind::Default => "default",
+                ModelSelectionKind::Explicit => "explicit",
+            },
+            selected_model.value,
+            mode,
+            now,
+            session_id,
+            expected_revision
+        ],
+    )?;
+    get_session(conn, session_id)?
+        .ok_or_else(|| crate::error::AppError::msg(format!("Session not found: {session_id}")))
+}
+
+#[allow(dead_code)]
+pub fn default_selection_for_new_session(
+    conn: &Connection,
+    current_chat_model: &str,
+) -> (ChatBackend, ModelSelection) {
+    let mut stmt = match conn.prepare(
+        "SELECT backend, selected_backend_id, selected_model_kind, selected_model_value
+         FROM chat_sessions
+         ORDER BY created_at DESC, id DESC
+         LIMIT 1",
+    ) {
+        Ok(stmt) => stmt,
+        Err(_) => return (ChatBackend::Nest, ModelSelection::default()),
+    };
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, Option<String>>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, Option<String>>(3)?,
+        ))
+    });
+    let rows = match rows {
+        Ok(rows) => rows,
+        Err(_) => return (ChatBackend::Nest, ModelSelection::default()),
+    };
+    if let Some(row) = rows.flatten().next() {
+        let (backend, selected_backend, model_kind, model_value) = row;
+        let backend_id = backend
+            .as_deref()
+            .and_then(|value| ChatBackend::parse(value).ok())
+            .or_else(|| {
+                selected_backend
+                    .as_deref()
+                    .and_then(|value| ChatBackend::parse(value).ok())
+            })
+            .unwrap_or(ChatBackend::Nest);
+        let model = match model_kind.as_deref() {
+            Some("explicit") => {
+                ModelSelection::parse("explicit", model_value.as_deref()).unwrap_or_default()
+            }
+            _ => {
+                if backend_id == ChatBackend::Nest && !current_chat_model.trim().is_empty() {
+                    ModelSelection {
+                        kind: ModelSelectionKind::Explicit,
+                        value: Some(current_chat_model.trim().to_string()),
+                    }
+                } else {
+                    ModelSelection::default()
+                }
+            }
+        };
+        return (backend_id, model);
+    }
+    let model = if !current_chat_model.trim().is_empty() {
+        ModelSelection {
+            kind: ModelSelectionKind::Explicit,
+            value: Some(current_chat_model.trim().to_string()),
+        }
+    } else {
+        ModelSelection::default()
+    };
+    (ChatBackend::Nest, model)
 }
 
 #[allow(dead_code)]
@@ -2482,6 +2698,143 @@ mod chat_backend_tests {
     }
 
     #[test]
+    fn selection_update_requires_matching_revision() {
+        let conn = migrated_db();
+        let session = create_session(&conn, "New chat").unwrap();
+        let updated = update_session_selection(
+            &conn,
+            &session.id,
+            0,
+            SelectionPatch {
+                selected_backend_id: Some(ChatBackend::Claude),
+                selected_model: Some(ModelSelection::parse("explicit", Some("glm-5.3")).unwrap()),
+                mode: Some("agent".to_string()),
+            },
+        )
+        .unwrap();
+        assert_eq!(updated.selection_revision, 1);
+        assert_eq!(updated.selected_backend_id.as_deref(), Some("claude"));
+        assert_eq!(updated.selected_model.value.as_deref(), Some("glm-5.3"));
+        assert_eq!(updated.mode, "agent");
+
+        let stale = update_session_selection(&conn, &session.id, 0, SelectionPatch::default());
+        assert!(stale.is_err());
+        let message = stale.unwrap_err().to_string();
+        assert!(message.contains("chat_selection_stale"));
+    }
+
+    #[test]
+    fn bound_sessions_reject_backend_selection_change() {
+        let conn = migrated_db();
+        let session = create_session(&conn, "New chat").unwrap();
+        let mut conn = conn;
+        begin_chat_turn(&mut conn, &session.id, 0, "hi").unwrap();
+        let result = update_session_selection(
+            &conn,
+            &session.id,
+            0,
+            SelectionPatch {
+                selected_backend_id: Some(ChatBackend::Nest),
+                ..Default::default()
+            },
+        );
+        assert!(result.is_err());
+        let message = result.unwrap_err().to_string();
+        assert!(message.contains("chat_backend_bound"));
+    }
+
+    #[test]
+    fn bound_sessions_can_still_change_model_and_mode() {
+        let conn = migrated_db();
+        let session = create_session(&conn, "New chat").unwrap();
+        update_session_selection(
+            &conn,
+            &session.id,
+            0,
+            SelectionPatch {
+                selected_backend_id: Some(ChatBackend::Claude),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut conn = conn;
+        begin_chat_turn(&mut conn, &session.id, 1, "hi").unwrap();
+        let updated = update_session_selection(
+            &conn,
+            &session.id,
+            1,
+            SelectionPatch {
+                selected_model: Some(ModelSelection::parse("explicit", Some("glm-4.7")).unwrap()),
+                mode: Some("agent".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(updated.selected_model.value.as_deref(), Some("glm-4.7"));
+        assert_eq!(updated.mode, "agent");
+        assert_eq!(updated.backend, Some(ChatBackend::Claude));
+    }
+
+    #[test]
+    fn new_session_defaults_inherit_most_recent_session() {
+        let conn = migrated_db();
+        conn.execute(
+            "INSERT INTO settings(key, value) VALUES ('chat_model', 'gpt-test')",
+            [],
+        )
+        .unwrap();
+        let first = create_session(&conn, "a").unwrap();
+        update_session_selection(
+            &conn,
+            &first.id,
+            0,
+            SelectionPatch {
+                selected_backend_id: Some(ChatBackend::Claude),
+                selected_model: Some(ModelSelection::parse("explicit", Some("glm-5.3")).unwrap()),
+                mode: None,
+            },
+        )
+        .unwrap();
+
+        let (backend, model) = default_selection_for_new_session(&conn, "gpt-test");
+        assert_eq!(backend, ChatBackend::Claude);
+        assert_eq!(model.value.as_deref(), Some("glm-5.3"));
+
+        let (backend, model) = default_selection_for_new_session(&conn, "");
+        assert_eq!(backend, ChatBackend::Claude);
+        assert_eq!(
+            model.value.as_deref(),
+            Some("glm-5.3"),
+            "recent session selection inherits verbatim regardless of current chat_model"
+        );
+    }
+
+    #[test]
+    fn no_history_defaults_to_nest_with_configured_model() {
+        let conn = migrated_db();
+        let (backend, model) = default_selection_for_new_session(&conn, "gpt-test");
+        assert_eq!(backend, ChatBackend::Nest);
+        assert_eq!(model.value.as_deref(), Some("gpt-test"));
+        let (backend, model) = default_selection_for_new_session(&conn, "");
+        assert_eq!(backend, ChatBackend::Nest);
+        assert_eq!(model.kind, ModelSelectionKind::Default);
+    }
+
+    #[test]
+    fn local_title_collapses_whitespace_and_truncates() {
+        assert_eq!(local_session_title("hello"), "hello");
+        assert_eq!(local_session_title("  a \n b\t c  "), "a b c");
+        assert_eq!(local_session_title(""), "New chat");
+        assert_eq!(local_session_title("   \n\t "), "New chat");
+        let long = "x".repeat(60);
+        let title = local_session_title(&long);
+        assert_eq!(title.chars().count(), 49);
+        assert!(title.ends_with('…'));
+        let exactly = "y".repeat(48);
+        assert_eq!(local_session_title(&exactly), exactly);
+    }
+
+    #[test]
     fn migration_backfill_runs_once_and_never_touches_new_unbound_sessions() {
         let conn = legacy_db_with_session();
         migrate(&conn).unwrap();
@@ -2508,9 +2861,7 @@ mod chat_backend_tests {
         let conn = migrated_db();
         let session = create_session(&conn, "New chat").unwrap();
         let mut conn = conn;
-        let prepared =
-            bind_backend_and_insert_user_message(&mut conn, &session.id, ChatBackend::Nest, "hi")
-                .unwrap();
+        let prepared = begin_chat_turn(&mut conn, &session.id, 0, "hi").unwrap();
         assert_eq!(prepared.session.backend, Some(ChatBackend::Nest));
         assert_eq!(prepared.session.backend_status, ChatBackendStatus::Ready);
         assert_eq!(prepared.user_message.role, "user");
@@ -2529,10 +2880,18 @@ mod chat_backend_tests {
     fn first_bind_claude_stays_uninitialized() {
         let conn = migrated_db();
         let session = create_session(&conn, "New chat").unwrap();
+        update_session_selection(
+            &conn,
+            &session.id,
+            0,
+            SelectionPatch {
+                selected_backend_id: Some(ChatBackend::Claude),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let mut conn = conn;
-        let prepared =
-            bind_backend_and_insert_user_message(&mut conn, &session.id, ChatBackend::Claude, "hi")
-                .unwrap();
+        let prepared = begin_chat_turn(&mut conn, &session.id, 1, "hi").unwrap();
         assert_eq!(prepared.session.backend, Some(ChatBackend::Claude));
         assert_eq!(
             prepared.session.backend_status,
@@ -2544,9 +2903,18 @@ mod chat_backend_tests {
     fn claude_init_marks_session_ready() {
         let conn = migrated_db();
         let session = create_session(&conn, "New chat").unwrap();
+        update_session_selection(
+            &conn,
+            &session.id,
+            0,
+            SelectionPatch {
+                selected_backend_id: Some(ChatBackend::Claude),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let mut conn = conn;
-        bind_backend_and_insert_user_message(&mut conn, &session.id, ChatBackend::Claude, "hi")
-            .unwrap();
+        begin_chat_turn(&mut conn, &session.id, 1, "hi").unwrap();
         let updated =
             set_session_backend_status(&conn, &session.id, ChatBackendStatus::Ready).unwrap();
         assert_eq!(updated.backend, Some(ChatBackend::Claude));
@@ -2564,32 +2932,129 @@ mod chat_backend_tests {
     fn second_bind_keeps_existing_backend_and_still_inserts_message() {
         let conn = migrated_db();
         let session = create_session(&conn, "New chat").unwrap();
-        let mut conn = conn;
-        bind_backend_and_insert_user_message(&mut conn, &session.id, ChatBackend::Nest, "one")
-            .unwrap();
-        let prepared = bind_backend_and_insert_user_message(
-            &mut conn,
+        update_session_selection(
+            &conn,
             &session.id,
-            ChatBackend::Claude,
-            "two",
+            0,
+            SelectionPatch {
+                selected_backend_id: Some(ChatBackend::Claude),
+                ..Default::default()
+            },
         )
         .unwrap();
-        assert_eq!(prepared.session.backend, Some(ChatBackend::Nest));
+        let mut conn = conn;
+        begin_chat_turn(&mut conn, &session.id, 1, "one").unwrap();
+        let prepared = begin_chat_turn(&mut conn, &session.id, 1, "two").unwrap();
+        assert_eq!(
+            prepared.session.backend,
+            Some(ChatBackend::Claude),
+            "bound backend wins over any later selection"
+        );
         let messages = list_messages(&conn, &session.id).unwrap();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[1].content, "two");
     }
 
     #[test]
+    fn begin_chat_turn_rejects_stale_revision() {
+        let conn = migrated_db();
+        let session = create_session(&conn, "New chat").unwrap();
+        let mut conn = conn;
+        let result = begin_chat_turn(&mut conn, &session.id, 7, "hi");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("chat_selection_stale"));
+    }
+
+    #[test]
+    fn first_claude_turn_writes_local_title() {
+        let conn = migrated_db();
+        let session = create_session(&conn, "New chat").unwrap();
+        update_session_selection(
+            &conn,
+            &session.id,
+            0,
+            SelectionPatch {
+                selected_backend_id: Some(ChatBackend::Claude),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut conn = conn;
+        let prepared =
+            begin_chat_turn(&mut conn, &session.id, 1, "how do I export a pack?").unwrap();
+        assert_eq!(prepared.session.title, "how do I export a pack?");
+        assert_eq!(prepared.session.title_source, TITLE_SOURCE_LOCAL);
+    }
+
+    #[test]
+    fn first_nest_turn_keeps_placeholder_title() {
+        let conn = migrated_db();
+        let session = create_session(&conn, "New chat").unwrap();
+        let mut conn = conn;
+        let prepared = begin_chat_turn(&mut conn, &session.id, 0, "hello world").unwrap();
+        assert_eq!(prepared.session.title, "New chat");
+        assert_eq!(prepared.session.title_source, TITLE_SOURCE_PLACEHOLDER);
+    }
+
+    #[test]
+    fn chat_turn_row_is_created_running_then_finished() {
+        let conn = migrated_db();
+        let session = create_session(&conn, "New chat").unwrap();
+        let mut conn = conn;
+        let prepared = begin_chat_turn(&mut conn, &session.id, 0, "hi").unwrap();
+        let status: (String, String) = conn
+            .query_row(
+                "SELECT status, backend_id FROM chat_turns WHERE id = ?1",
+                params![prepared.turn_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status.0, "running");
+        assert_eq!(status.1, "nest");
+
+        let assistant = add_message(
+            &mut conn,
+            &session.id,
+            NewChatMessage {
+                role: "assistant",
+                content: "answer",
+                citations: None,
+                thinking: None,
+                thinking_seconds: None,
+                file_changes: &[],
+            },
+        )
+        .unwrap();
+        finish_chat_turn(
+            &conn,
+            &prepared.turn_id,
+            "succeeded",
+            Some("gpt-test"),
+            Some(&assistant.id),
+            None,
+            None,
+        )
+        .unwrap();
+        let finished: (String, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT status, effective_model, assistant_message_id FROM chat_turns WHERE id = ?1",
+                params![prepared.turn_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(finished.0, "succeeded");
+        assert_eq!(finished.1.as_deref(), Some("gpt-test"));
+        assert_eq!(finished.2.as_deref(), Some(assistant.id.as_str()));
+    }
+
+    #[test]
     fn bind_unknown_session_fails_without_side_effects() {
         let conn = migrated_db();
         let mut conn = conn;
-        let result = bind_backend_and_insert_user_message(
-            &mut conn,
-            "00000000-0000-4000-8000-000000000000",
-            ChatBackend::Claude,
-            "hi",
-        );
+        let result = begin_chat_turn(&mut conn, "00000000-0000-4000-8000-000000000000", 0, "hi");
         assert!(result.is_err());
     }
 
@@ -2597,9 +3062,18 @@ mod chat_backend_tests {
     fn unresumable_status_persists() {
         let conn = migrated_db();
         let session = create_session(&conn, "New chat").unwrap();
+        update_session_selection(
+            &conn,
+            &session.id,
+            0,
+            SelectionPatch {
+                selected_backend_id: Some(ChatBackend::Claude),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let mut conn = conn;
-        bind_backend_and_insert_user_message(&mut conn, &session.id, ChatBackend::Claude, "hi")
-            .unwrap();
+        begin_chat_turn(&mut conn, &session.id, 1, "hi").unwrap();
         set_session_backend_status(&conn, &session.id, ChatBackendStatus::Unresumable).unwrap();
         let reloaded = get_session(&conn, &session.id).unwrap().unwrap();
         assert_eq!(reloaded.backend, Some(ChatBackend::Claude));
@@ -2637,8 +3111,7 @@ mod chat_backend_tests {
         let session = create_session(&conn, "New chat").unwrap();
         let before = session.updated_at.clone();
         let mut conn = conn;
-        bind_backend_and_insert_user_message(&mut conn, &session.id, ChatBackend::Claude, "hi")
-            .unwrap();
+        begin_chat_turn(&mut conn, &session.id, 0, "hi").unwrap();
         let after = get_session(&conn, &session.id).unwrap().unwrap();
         assert_ne!(after.updated_at, before);
     }

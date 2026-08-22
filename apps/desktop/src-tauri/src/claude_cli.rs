@@ -395,6 +395,7 @@ pub struct ClaudeTurnRequest<'a> {
     pub session_id: &'a str,
     pub mode: TurnMode,
     pub prompt: &'a str,
+    pub model: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -490,7 +491,7 @@ fn version_args() -> Vec<String> {
     vec!["--version".to_string()]
 }
 
-fn turn_args(mode: TurnMode, session_id: &str) -> Vec<String> {
+fn turn_args(mode: TurnMode, session_id: &str, model: Option<&str>) -> Vec<String> {
     let mut args = vec![
         "-p".to_string(),
         "--output-format".to_string(),
@@ -507,6 +508,10 @@ fn turn_args(mode: TurnMode, session_id: &str) -> Vec<String> {
             args.push("--resume".to_string());
             args.push(session_id.to_string());
         }
+    }
+    if let Some(model) = model {
+        args.push("--model".to_string());
+        args.push(model.to_string());
     }
     args
 }
@@ -894,7 +899,7 @@ async fn execute_single_turn(
     events: &TurnEvents,
     cancel: &CancelToken,
 ) -> Result<ClaudeTurnResult, ClaudeTurnError> {
-    let args = turn_args(request.mode, request.session_id);
+    let args = turn_args(request.mode, request.session_id, request.model);
     let mut command = spawn_command(detection, &args);
     command.current_dir(request.vault_root);
     let mut guard = ChildGuard::spawn(command).map_err(|error| ClaudeTurnError::SpawnFailed {
@@ -2362,6 +2367,7 @@ fs.writeFileSync('attempts.txt', String(attempts + 1));
             session_id: SESSION,
             mode: TurnMode::NewSession,
             prompt: "hi",
+            model: None,
         };
         let cancel = never_cancel();
         let result = run_turn(&detection, request, &events, &cancel)
@@ -2384,6 +2390,7 @@ fs.writeFileSync('attempts.txt', String(attempts + 1));
             session_id: SESSION,
             mode: TurnMode::NewSession,
             prompt: "from stdin",
+            model: None,
         };
         let result = run(&detection, request).await.unwrap();
         assert_eq!(result.answer, "mode:new:from stdin:");
@@ -2398,6 +2405,7 @@ fs.writeFileSync('attempts.txt', String(attempts + 1));
             session_id: SESSION,
             mode: TurnMode::Resume,
             prompt: "next",
+            model: None,
         };
         let result = run(&detection, request).await.unwrap();
         assert_eq!(result.answer, "mode:resume:next:");
@@ -2419,6 +2427,7 @@ for (const line of lines) { console.log(line); }"#,
             session_id: SESSION,
             mode: TurnMode::NewSession,
             prompt: "retry me",
+            model: None,
         };
         let result = run(&detection, request).await.unwrap();
         assert_eq!(result.answer, "recovered:retry me");
@@ -2441,6 +2450,7 @@ process.exit(2);"#,
             session_id: SESSION,
             mode: TurnMode::NewSession,
             prompt: "hi",
+            model: None,
         };
         let error = run(&detection, request).await.unwrap_err();
         match error {
@@ -2470,6 +2480,7 @@ process.exit(2);"#,
             session_id: SESSION,
             mode: TurnMode::NewSession,
             prompt: "hi",
+            model: None,
         };
         let error = run(&detection, request).await.unwrap_err();
         assert!(matches!(error, ClaudeTurnError::Protocol { .. }));
@@ -2489,6 +2500,7 @@ process.exit(2);"#,
             session_id: SESSION,
             mode: TurnMode::Resume,
             prompt: "hi",
+            model: None,
         };
         let error = run(&detection, request).await.unwrap_err();
         assert!(matches!(
@@ -2521,6 +2533,7 @@ for (const line of lines) {{ console.log(line); }}
             session_id: SESSION,
             mode: TurnMode::NewSession,
             prompt: "hi",
+            model: None,
         };
         let error = run(&detection, request).await.unwrap_err();
         match error {
@@ -2560,6 +2573,7 @@ process.exit(3);
             session_id: SESSION,
             mode: TurnMode::NewSession,
             prompt: "hi",
+            model: None,
         };
         let error = run(&detection, request).await.unwrap_err();
         match error {
@@ -2586,6 +2600,7 @@ process.exit(3);
             session_id: SESSION,
             mode: TurnMode::NewSession,
             prompt: "hi",
+            model: None,
         };
         let error = run(&detection, request).await.unwrap_err();
         match error {
@@ -2615,6 +2630,7 @@ process.exit(3);
             session_id: SESSION,
             mode: TurnMode::NewSession,
             prompt: "hi",
+            model: None,
         };
         let events = TurnEvents::default();
         let cancel_for_task = cancel.clone();
@@ -2647,6 +2663,7 @@ process.exit(3);
             session_id: SESSION,
             mode: TurnMode::NewSession,
             prompt: "hi",
+            model: None,
         };
         let error = run(&detection, request).await.unwrap_err();
         assert!(matches!(error, ClaudeTurnError::SpawnFailed { .. }));
@@ -2665,6 +2682,7 @@ process.exit(3);
             session_id: SESSION,
             mode: TurnMode::NewSession,
             prompt: "hi",
+            model: None,
         };
         let cancel = never_cancel();
         let error = run_turn(&detection, request, &events, &cancel)
@@ -2687,6 +2705,7 @@ process.exit(3);
             session_id: SESSION,
             mode: TurnMode::NewSession,
             prompt: "hi",
+            model: None,
         };
         let error = run(&detection, request).await.unwrap_err();
         match error {
@@ -2709,6 +2728,7 @@ for (const line of lines) { console.log(line); }
             session_id: SESSION,
             mode: TurnMode::NewSession,
             prompt: "hi",
+            model: None,
         };
         let error = run(&detection, request).await.unwrap_err();
         assert!(matches!(error, ClaudeTurnError::SessionMismatch { .. }));

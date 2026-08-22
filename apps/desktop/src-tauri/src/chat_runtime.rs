@@ -16,6 +16,7 @@ pub struct ChatRunRequest {
     pub focus_paths: Vec<String>,
     pub prior_history: Vec<rig::completion::Message>,
     pub mode: String,
+    pub requested_model: db::ModelSelection,
     pub protected_paths: Vec<String>,
     pub stream_event: String,
 }
@@ -27,6 +28,7 @@ pub struct ChatRunResult {
     pub thinking_seconds: Option<f64>,
     pub file_changes: Vec<db::NewChatFileChange>,
     pub backend: ChatBackend,
+    pub effective_model: Option<String>,
 }
 
 pub fn claude_mode_for(session: &ChatSession) -> Option<TurnMode> {
@@ -60,7 +62,9 @@ async fn run_nest(request: ChatRunRequest) -> Result<ChatRunResult, crate::error
         mode,
         protected_paths,
         stream_event,
+        ..
     } = request;
+    let effective_model = settings.chat_model.clone();
     let result: AgentChatResult = crate::agent::run_agent_chat(AgentChatRequest {
         app,
         state,
@@ -82,6 +86,7 @@ async fn run_nest(request: ChatRunRequest) -> Result<ChatRunResult, crate::error
         thinking_seconds: result.thinking_seconds,
         file_changes: result.file_changes,
         backend: ChatBackend::Nest,
+        effective_model: (!effective_model.trim().is_empty()).then_some(effective_model),
     })
 }
 
@@ -149,6 +154,7 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
         session_id: &session_id,
         mode: turn_mode,
         prompt: &query,
+        model: request.requested_model.cli_model_arg(),
     };
     let cancel = state.begin_chat_cancel_arc();
     let result = match claude_cli::run_turn(detection, turn_request, &events, &cancel).await {
@@ -178,6 +184,11 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
         }
     };
 
+    let effective_model = result
+        .model
+        .clone()
+        .or_else(|| request.requested_model.value.clone());
+
     Ok(ChatRunResult {
         answer: result.answer,
         citations: Vec::new(),
@@ -185,6 +196,7 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
         thinking_seconds: None,
         file_changes: Vec::new(),
         backend: ChatBackend::Claude,
+        effective_model,
     })
 }
 
@@ -401,6 +413,9 @@ mod tests {
             updated_at: "2026-01-01T00:00:00Z".to_string(),
             backend: None,
             backend_status: ChatBackendStatus::Uninitialized,
+            selected_backend_id: Some("nest".to_string()),
+            selected_model: db::ModelSelection::default(),
+            selection_revision: 0,
         }
     }
 }
