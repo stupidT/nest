@@ -185,11 +185,14 @@ export function SettingsPanel() {
     const initial: AppSettings = {
       ...EMPTY,
       ...data,
-      // Older backends may omit this field until the desktop binary is rebuilt.
+      // Older backends may omit fields until the desktop binary is rebuilt.
       proxy_enabled:
         typeof data.proxy_enabled === "boolean"
           ? data.proxy_enabled
           : Boolean(data.proxy_url?.trim()),
+      claude_agent_enabled: data.claude_agent_enabled ?? false,
+      claude_cli_path: data.claude_cli_path ?? "",
+      claude_custom_models: data.claude_custom_models ?? "",
     };
     setForm(initial);
     setFontSizeDraft(String(initial.font_size_pt));

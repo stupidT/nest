@@ -46,10 +46,10 @@ function useClaudeAgentSettings(settingsQuery: {
 
   useEffect(() => {
     if (!settingsQuery.data || hydrated) return;
-    const customModels = settingsQuery.data.claude_custom_models;
+    const customModels = settingsQuery.data.claude_custom_models ?? "";
     setDraft({
-      enabled: settingsQuery.data.claude_agent_enabled,
-      cliPath: settingsQuery.data.claude_cli_path,
+      enabled: settingsQuery.data.claude_agent_enabled ?? false,
+      cliPath: settingsQuery.data.claude_cli_path ?? "",
       customModels,
     });
     setModelRows(parseModelRows(customModels));

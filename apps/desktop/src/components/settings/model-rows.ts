@@ -1,5 +1,5 @@
-export function parseModelRows(value: string): string[] {
-  const rows = value.split("\n").map((row) => row);
+export function parseModelRows(value: string | null | undefined): string[] {
+  const rows = (value ?? "").split("\n").map((row) => row);
   return rows.length === 0 ? [""] : rows;
 }
 
