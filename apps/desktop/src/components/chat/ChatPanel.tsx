@@ -1,10 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { ChatMessage, ChatMode, ChatSession, Citation } from "@nest/shared";
+import type { AppSettings, ChatMessage, ChatMode, ChatSession, Citation } from "@nest/shared";
 import {
   MessageScroller,
   useMessageScroller,
 } from "@shadcn/react/message-scroller";
-import { AlertCircle, Check, ChevronDown, FilePenLine, Info, Lightbulb, Loader2, X } from "lucide-react";
+import { AlertCircle, Check, ChevronDown, FilePenLine, Info, Lightbulb, Loader2, LoaderCircle, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   AgentStatusIndicator,
@@ -161,6 +161,53 @@ export function ChatPanel() {
     currentSession ? { backend: currentSession.backend, backend_status: currentSession.backend_status } : null,
     claudeStatus,
   );
+
+  const reconnectClaude = useMutation({
+    mutationFn: () => {
+      const cliPath =
+        claudeConnectionQuery.data?.configured_cli_path ?? "";
+      return api.claudeTestConnection(cliPath);
+    },
+    onSuccess: (report) => {
+      if (report.status === "connected") {
+        const settings = queryClient.getQueryData<AppSettings>(
+          queryKeys.settings,
+        );
+        void api
+          .claudeSaveSettings({
+            enabled: true,
+            cliPath:
+              report.configured_cli_path ||
+              settings?.claude_cli_path ||
+              "",
+            customModels: settings?.claude_custom_models ?? "",
+          })
+          .then(() => {
+            void queryClient.invalidateQueries({
+              queryKey: queryKeys.claudeConnection,
+            });
+            void queryClient.invalidateQueries({
+              queryKey: queryKeys.settings,
+            });
+          })
+          .catch((e: unknown) =>
+            setStatusMessage(
+              appErrorMessage(e, "Could not save the reconnected Claude settings"),
+            ),
+          );
+      } else {
+        void queryClient.invalidateQueries({
+          queryKey: queryKeys.claudeConnection,
+        });
+        setStatusMessage(
+          report.message ?? "Claude reconnection failed",
+        );
+      }
+    },
+    onError: (e: unknown) => {
+      setStatusMessage(appErrorMessage(e, "Could not reconnect Claude"));
+    },
+  });
 
   const changeMode = (nextMode: ChatMode) => {
     if (!sessionId || isSending || nextMode === mode) return;
@@ -538,10 +585,25 @@ export function ChatPanel() {
 
       <div className="shrink-0 px-3 pb-3 pt-4">
         {composerBlocked && (
-          <p className="mb-2 flex items-center gap-1.5 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
-            <AlertCircle className="size-3.5 shrink-0" />
-            {composerBlocked}
-          </p>
+          <div className="mb-2 flex items-center justify-between gap-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+            <span className="flex min-w-0 items-center gap-1.5">
+              <AlertCircle className="size-3.5 shrink-0" />
+              {composerBlocked}
+            </span>
+            {composerGate.reconnectable && (
+              <button
+                type="button"
+                className="flex shrink-0 items-center gap-1 font-medium text-primary hover:underline disabled:opacity-60"
+                disabled={reconnectClaude.isPending}
+                onClick={() => reconnectClaude.mutate()}
+              >
+                {reconnectClaude.isPending && (
+                  <LoaderCircle className="size-3.5 animate-spin" />
+                )}
+                Reconnect
+              </button>
+            )}
+          </div>
         )}
         {!composerBlocked && backendNotice && (
           <p className="mb-2 flex items-center justify-between gap-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">

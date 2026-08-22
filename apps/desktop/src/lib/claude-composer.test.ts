@@ -26,6 +26,7 @@ describe("claudeComposerGate", () => {
       const gate = claudeComposerGate(session("nest", "ready"), status);
       expect(gate.blocked, `status=${status}`).toBe(false);
       expect(gate.reason).toBeNull();
+      expect(gate.reconnectable).toBe(false);
     }
   });
 
@@ -45,6 +46,7 @@ describe("claudeComposerGate", () => {
     const gate = claudeComposerGate(session(null), "unavailable");
     expect(gate.blocked).toBe(true);
     expect(gate.reason).toContain("not connected");
+    expect(gate.reconnectable).toBe(true);
   });
 
   it("keeps Claude-bound sessions usable while connected", () => {
@@ -60,6 +62,7 @@ describe("claudeComposerGate", () => {
     const disabled = claudeComposerGate(session("claude", "ready"), "disabled");
     expect(disabled.blocked).toBe(true);
     expect(disabled.reason).toContain("disabled");
+    expect(disabled.reconnectable).toBe(false);
 
     const unavailable = claudeComposerGate(
       session("claude", "ready"),
@@ -67,6 +70,7 @@ describe("claudeComposerGate", () => {
     );
     expect(unavailable.blocked).toBe(true);
     expect(unavailable.reason).toContain("unavailable");
+    expect(unavailable.reconnectable).toBe(true);
   });
 
   it("makes unresumable Claude sessions read-only regardless of connection state", () => {
@@ -74,6 +78,7 @@ describe("claudeComposerGate", () => {
       const gate = claudeComposerGate(session("claude", "unresumable"), status);
       expect(gate.blocked, `status=${status}`).toBe(true);
       expect(gate.reason).toContain("no longer be resumed");
+      expect(gate.reconnectable).toBe(false);
     }
   });
 
