@@ -214,6 +214,55 @@ pub enum ChatBackendStatus {
     Unresumable,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ModelSelection {
+    pub kind: ModelSelectionKind,
+    #[serde(default)]
+    pub value: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelSelectionKind {
+    #[default]
+    Default,
+    Explicit,
+}
+
+impl ModelSelection {
+    #[allow(dead_code)]
+    pub fn cli_model_arg(&self) -> Option<&str> {
+        match self.kind {
+            ModelSelectionKind::Default => Some("default"),
+            ModelSelectionKind::Explicit => self.value.as_deref(),
+        }
+    }
+
+    pub fn parse(kind: &str, value: Option<&str>) -> AppResult<Self> {
+        match kind {
+            "default" => Ok(Self {
+                kind: ModelSelectionKind::Default,
+                value: None,
+            }),
+            "explicit" => {
+                let value = value.unwrap_or_default().trim();
+                if value.is_empty() {
+                    return Err(crate::error::AppError::msg(
+                        "explicit model selection requires a model id",
+                    ));
+                }
+                Ok(Self {
+                    kind: ModelSelectionKind::Explicit,
+                    value: Some(value.to_string()),
+                })
+            }
+            other => Err(crate::error::AppError::msg(format!(
+                "Unknown model selection kind: {other}"
+            ))),
+        }
+    }
+}
+
 impl ChatBackendStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -241,7 +290,7 @@ pub struct ChatSession {
     pub title: String,
     pub pinned: bool,
     pub archived: bool,
-    /// `placeholder` | `llm` | `manual`
+    /// `placeholder` | `llm` | `manual` | `local`
     pub title_source: String,
     /// `ask` | `agent`
     pub mode: String,
@@ -251,6 +300,12 @@ pub struct ChatSession {
     pub backend: Option<ChatBackend>,
     #[serde(default)]
     pub backend_status: ChatBackendStatus,
+    #[serde(default)]
+    pub selected_backend_id: Option<String>,
+    #[serde(default)]
+    pub selected_model: ModelSelection,
+    #[serde(default)]
+    pub selection_revision: u32,
 }
 
 #[allow(dead_code)]
@@ -522,7 +577,58 @@ fn ensure_chat_session_backend_columns(conn: &Connection) -> AppResult<()> {
             [],
         )?;
     }
+    if !table_has_column(conn, "chat_sessions", "selected_backend_id")? {
+        conn.execute(
+            "ALTER TABLE chat_sessions ADD COLUMN selected_backend_id TEXT",
+            [],
+        )?;
+        conn.execute(
+            "UPDATE chat_sessions SET selected_backend_id = backend WHERE backend IS NOT NULL",
+            [],
+        )?;
+        conn.execute(
+            "UPDATE chat_sessions SET selected_backend_id = 'nest' WHERE selected_backend_id IS NULL",
+            [],
+        )?;
+    }
+    if !table_has_column(conn, "chat_sessions", "selected_model_kind")? {
+        conn.execute(
+            "ALTER TABLE chat_sessions ADD COLUMN selected_model_kind TEXT",
+            [],
+        )?;
+        conn.execute(
+            "ALTER TABLE chat_sessions ADD COLUMN selected_model_value TEXT",
+            [],
+        )?;
+        conn.execute(
+            "UPDATE chat_sessions
+             SET selected_model_kind = CASE
+                 WHEN backend = 'nest' AND ?1 != '' THEN 'explicit'
+                 ELSE 'default'
+             END,
+             selected_model_value = CASE
+                 WHEN backend = 'nest' AND ?1 != '' THEN ?1
+                 ELSE NULL
+             END",
+            params![current_chat_model(conn)],
+        )?;
+    }
+    if !table_has_column(conn, "chat_sessions", "selection_revision")? {
+        conn.execute(
+            "ALTER TABLE chat_sessions ADD COLUMN selection_revision INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
     Ok(())
+}
+
+fn current_chat_model(conn: &Connection) -> String {
+    conn.query_row(
+        "SELECT value FROM settings WHERE key = 'chat_model'",
+        [],
+        |row| row.get::<_, String>(0),
+    )
+    .unwrap_or_default()
 }
 
 fn ensure_sync_state_patch_columns(conn: &Connection) -> AppResult<()> {
@@ -693,6 +799,14 @@ fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatSession> {
     let status_raw: String = row.get(9)?;
     let backend_status =
         ChatBackendStatus::parse(&status_raw).map_err(|error| row_conversion_failure(9, error))?;
+    let selected_backend_id: Option<String> = row.get(10)?;
+    let model_kind: Option<String> = row.get(11)?;
+    let model_value: Option<String> = row.get(12)?;
+    let selected_model = match model_kind.as_deref() {
+        None => ModelSelection::default(),
+        Some(kind) => ModelSelection::parse(kind, model_value.as_deref())
+            .map_err(|error| row_conversion_failure(11, error))?,
+    };
     Ok(ChatSession {
         id: row.get(0)?,
         title: row.get(1)?,
@@ -704,6 +818,9 @@ fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatSession> {
         updated_at: row.get(7)?,
         backend,
         backend_status,
+        selected_backend_id,
+        selected_model,
+        selection_revision: row.get(13)?,
     })
 }
 
@@ -1066,8 +1183,9 @@ pub fn create_session(conn: &Connection, title: &str) -> AppResult<ChatSession> 
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     conn.execute(
-        "INSERT INTO chat_sessions (id, title, pinned, archived, title_source, mode, created_at, updated_at)
-         VALUES (?1, ?2, 0, 0, ?3, 'ask', ?4, ?5)",
+        "INSERT INTO chat_sessions (id, title, pinned, archived, title_source, mode, created_at, updated_at,
+            selected_backend_id, selected_model_kind, selected_model_value, selection_revision)
+         VALUES (?1, ?2, 0, 0, ?3, 'ask', ?4, ?5, 'nest', 'default', NULL, 0)",
         params![id, title, TITLE_SOURCE_PLACEHOLDER, now, now],
     )?;
     Ok(ChatSession {
@@ -1081,12 +1199,15 @@ pub fn create_session(conn: &Connection, title: &str) -> AppResult<ChatSession> 
         updated_at: now,
         backend: None,
         backend_status: ChatBackendStatus::Uninitialized,
+        selected_backend_id: Some("nest".to_string()),
+        selected_model: ModelSelection::default(),
+        selection_revision: 0,
     })
 }
 
 pub fn get_or_create_initial_session(conn: &Connection) -> AppResult<ChatSession> {
     let mut stmt = conn.prepare(
-        "SELECT id, title, pinned, archived, title_source, mode, created_at, updated_at, backend, backend_status
+        "SELECT id, title, pinned, archived, title_source, mode, created_at, updated_at, backend, backend_status, selected_backend_id, selected_model_kind, selected_model_value, selection_revision
          FROM chat_sessions
          WHERE archived = 0
          ORDER BY pinned DESC, updated_at DESC
@@ -1103,7 +1224,7 @@ pub fn get_or_create_initial_session(conn: &Connection) -> AppResult<ChatSession
 
 pub fn get_session(conn: &Connection, session_id: &str) -> AppResult<Option<ChatSession>> {
     let mut stmt = conn.prepare(
-        "SELECT id, title, pinned, archived, title_source, mode, created_at, updated_at, backend, backend_status
+        "SELECT id, title, pinned, archived, title_source, mode, created_at, updated_at, backend, backend_status, selected_backend_id, selected_model_kind, selected_model_value, selection_revision
          FROM chat_sessions WHERE id = ?1",
     )?;
     let mut rows = stmt.query(params![session_id])?;
@@ -1116,7 +1237,7 @@ pub fn get_session(conn: &Connection, session_id: &str) -> AppResult<Option<Chat
 
 pub fn list_sessions(conn: &Connection) -> AppResult<Vec<ChatSession>> {
     let mut stmt = conn.prepare(
-        "SELECT id, title, pinned, archived, title_source, mode, created_at, updated_at, backend, backend_status
+        "SELECT id, title, pinned, archived, title_source, mode, created_at, updated_at, backend, backend_status, selected_backend_id, selected_model_kind, selected_model_value, selection_revision
          FROM chat_sessions
          ORDER BY pinned DESC, updated_at DESC",
     )?;
@@ -2321,6 +2442,43 @@ mod chat_backend_tests {
         let session = get_session(&conn, "legacy").unwrap().unwrap();
         assert_eq!(session.backend, Some(ChatBackend::Nest));
         assert_eq!(session.backend_status, ChatBackendStatus::Ready);
+        assert_eq!(
+            session.selected_backend_id.as_deref(),
+            Some("nest"),
+            "bound legacy sessions inherit their backend as selection"
+        );
+        assert_eq!(session.selected_model.kind, ModelSelectionKind::Default);
+        assert_eq!(session.selection_revision, 0);
+    }
+
+    #[test]
+    fn new_sessions_start_with_nest_selection_and_zero_revision() {
+        let conn = migrated_db();
+        let session = create_session(&conn, "New chat").unwrap();
+        assert_eq!(session.backend, None);
+        assert_eq!(session.selected_backend_id.as_deref(), Some("nest"));
+        assert_eq!(session.selected_model.kind, ModelSelectionKind::Default);
+        assert_eq!(session.selection_revision, 0);
+    }
+
+    #[test]
+    fn model_selection_parse_validates_kind_and_value() {
+        assert_eq!(
+            ModelSelection::parse("default", None).unwrap().kind,
+            ModelSelectionKind::Default
+        );
+        assert!(ModelSelection::parse("explicit", Some("glm-5.3")).is_ok());
+        assert!(ModelSelection::parse("explicit", None).is_err());
+        assert!(ModelSelection::parse("explicit", Some("  ")).is_err());
+        assert!(ModelSelection::parse("bogus", None).is_err());
+    }
+
+    #[test]
+    fn cli_model_arg_maps_selection_to_transport() {
+        let default = ModelSelection::default();
+        assert_eq!(default.cli_model_arg(), Some("default"));
+        let explicit = ModelSelection::parse("explicit", Some("glm-5.3")).unwrap();
+        assert_eq!(explicit.cli_model_arg(), Some("glm-5.3"));
     }
 
     #[test]
