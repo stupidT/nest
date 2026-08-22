@@ -529,6 +529,15 @@ fn turn_args(
         if chat_mode == crate::knowledge_workspace::CapabilityMode::Ask {
             args.push("--strict-mcp-config".to_string());
         }
+        args.push("--allowedTools".to_string());
+        if chat_mode == crate::knowledge_workspace::CapabilityMode::Ask {
+            args.push(
+                "mcp__nest__knowledge_search,mcp__nest__knowledge_list,mcp__nest__knowledge_read"
+                    .to_string(),
+            );
+        } else {
+            args.push("mcp__nest__knowledge_search,mcp__nest__knowledge_list,mcp__nest__knowledge_read,mcp__nest__knowledge_create,mcp__nest__knowledge_replace,mcp__nest__knowledge_delete".to_string());
+        }
     }
     if let Some(instructions) = system_instructions {
         args.push("--append-system-prompt".to_string());
@@ -2440,12 +2449,15 @@ const prompt = fs.readFileSync(0, 'utf8');
 const mcpIndex = args.indexOf('--mcp-config');
 const mcp = mcpIndex >= 0 ? args[mcpIndex + 1] : 'none';
 const strict = args.includes('--strict-mcp-config') ? 'STRICT' : 'OPEN';
+const allowedIndex = args.indexOf('--allowedTools');
+const allowed = allowedIndex >= 0 ? args[allowedIndex + 1] : 'none';
+const readonlyOnly = !allowed.includes('knowledge_create') && !allowed.includes('knowledge_delete') && allowed.includes('knowledge_search') ? 'RO' : 'BAD';
 const config = mcp === 'none' ? '{}' : fs.readFileSync(mcp, 'utf8');
 const parsed = JSON.parse(config);
 const serverNames = Object.keys(parsed.mcpServers ?? {}).join(',');
 const lines = [];
 lines.push(JSON.stringify({type:'system',subtype:'init',session_id:'11111111-2222-4333-8444-555555555555',model:'m',claude_code_version:'v'}));
-lines.push(JSON.stringify({type:'result',subtype:'success',session_id:'11111111-2222-4333-8444-555555555555',result:strict + ':' + serverNames}));
+lines.push(JSON.stringify({type:'result',subtype:'success',session_id:'11111111-2222-4333-8444-555555555555',result:strict + ':' + serverNames + ':' + readonlyOnly}));
 for (const line of lines) { console.log(line); }
 "#;
         let detection = fx.write_fake_cli(script);
@@ -2469,7 +2481,41 @@ for (const line of lines) { console.log(line); }
             system_instructions: None,
         };
         let result = run(&detection, request).await.unwrap();
-        assert_eq!(result.answer, "STRICT:nest");
+        assert_eq!(result.answer, "STRICT:nest:RO");
+    }
+
+    #[tokio::test]
+    async fn agent_turn_preauthorizes_all_nest_tools() {
+        let fx = Fixture::new("turn-mcp-agent-allowed");
+        let script = r#"
+const fs = require('fs');
+const args = process.argv.slice(2);
+const prompt = fs.readFileSync(0, 'utf8');
+const allowedIndex = args.indexOf('--allowedTools');
+const allowed = allowedIndex >= 0 ? args[allowedIndex + 1] : 'none';
+const all = ['knowledge_search','knowledge_list','knowledge_read','knowledge_create','knowledge_replace','knowledge_delete']
+  .filter(t => !allowed.includes(t));
+const ok = allowed !== 'none' && all.length === 0 ? 'ALL' : 'MISSING:' + all.join(',');
+const lines = [];
+lines.push(JSON.stringify({type:'system',subtype:'init',session_id:'11111111-2222-4333-8444-555555555555',model:'m',claude_code_version:'v'}));
+lines.push(JSON.stringify({type:'result',subtype:'success',session_id:'11111111-2222-4333-8444-555555555555',result:ok}));
+for (const line of lines) { console.log(line); }
+"#;
+        let detection = fx.write_fake_cli(script);
+        let config_path = fx.root.join("mcp.json");
+        std::fs::write(&config_path, "{}").unwrap();
+        let request = ClaudeTurnRequest {
+            vault_root: &fx.vault_root(),
+            session_id: "11111111-2222-4333-8444-555555555555",
+            mode: TurnMode::NewSession,
+            prompt: "hi",
+            model: None,
+            chat_mode: crate::knowledge_workspace::CapabilityMode::Agent,
+            mcp_config_path: Some(config_path.as_path()),
+            system_instructions: None,
+        };
+        let result = run(&detection, request).await.unwrap();
+        assert_eq!(result.answer, "ALL");
     }
 
     #[tokio::test]
