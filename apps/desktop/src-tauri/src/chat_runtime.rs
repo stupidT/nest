@@ -171,6 +171,7 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
         (runtime.server.clone(), config_path)
     };
 
+    let instructions = nest_system_instructions(chat_mode);
     let turn_request = ClaudeTurnRequest {
         vault_root: &vault_root,
         session_id: &session_id,
@@ -179,6 +180,7 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
         model: request.requested_model.cli_model_arg(),
         chat_mode,
         mcp_config_path: Some(mcp_config_path.as_path()),
+        system_instructions: Some(&instructions),
     };
     let cancel = state.begin_chat_cancel_arc();
     let result = match claude_cli::run_turn(detection, turn_request, &events, &cancel).await {
@@ -224,6 +226,22 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
         backend: ChatBackend::Claude,
         effective_model: result.model,
     })
+}
+
+pub fn nest_system_instructions(mode: crate::knowledge_workspace::CapabilityMode) -> String {
+    let mode_line = match mode {
+        crate::knowledge_workspace::CapabilityMode::Ask => "You are in Ask mode: read-only. Use only the read-only Nest tools (knowledge_search, knowledge_list, knowledge_read) plus your built-in read-only tools.",
+        crate::knowledge_workspace::CapabilityMode::Agent => "You are in Agent mode. You may use all six Nest knowledge tools (knowledge_search, knowledge_list, knowledge_read, knowledge_create, knowledge_replace, knowledge_delete).",
+    };
+    format!(
+        "Nest knowledge integration:\n\
+        {mode_line}\n\
+        Nest-first routing preference:\n\
+        1. For searching and reading Markdown in active knowledge packs, prefer the Nest tools (knowledge_search, knowledge_read, knowledge_list) over generic file reads. They return verifiable, citable sources.\n\
+        2. For Markdown changes inside active packs, prefer knowledge_create/knowledge_replace/knowledge_delete. Changes made through these tools are staged as reviewable proposals — nothing is written to disk until the user approves.\n\
+        3. Fall back to your native file tools (Read/Edit/Write/Bash) only when the user explicitly asks for a direct change, or when a task cannot be expressed through the Nest tools. Native changes are NOT staged and NOT reviewable — never claim a native file edit has been reviewed or approved by Nest.\n\
+        4. Cite sources using the paths returned by the Nest tools, not paths you guess."
+    )
 }
 
 pub fn is_unresumable_failure(error: &claude_cli::ClaudeTurnError) -> bool {
