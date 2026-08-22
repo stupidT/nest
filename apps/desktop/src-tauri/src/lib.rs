@@ -69,6 +69,7 @@ pub fn run() {
             commands::claude_test_connection,
             commands::claude_save_settings,
             commands::claude_connection_status,
+            commands::claude_model_options,
             commands::settings_get,
             commands::settings_preview_knowledge_dir,
             commands::settings_change_knowledge_dir,

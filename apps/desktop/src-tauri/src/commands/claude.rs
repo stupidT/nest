@@ -61,6 +61,34 @@ fn spawn_strategy_name(target: &claude_cli::ClaudeLaunchTarget) -> String {
     }
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeModelOptionDto {
+    pub model_id: String,
+    pub source: String,
+}
+
+#[tauri::command]
+pub fn claude_model_options(state: State<'_, SharedState>) -> AppResult<Vec<ClaudeModelOptionDto>> {
+    let settings = {
+        let conn = state.db.lock();
+        db::get_settings(&conn)?
+    };
+    let observed = {
+        let conn = state.db.lock();
+        db::observed_claude_models(&conn, &settings.claude_cli_path)?
+    };
+    Ok(
+        db::claude_model_options(&observed, &settings.claude_custom_models)
+            .into_iter()
+            .map(|option| ClaudeModelOptionDto {
+                model_id: option.model_id,
+                source: option.source.as_str().to_string(),
+            })
+            .collect(),
+    )
+}
+
 #[tauri::command]
 pub async fn claude_test_connection(cli_path: String) -> AppResult<ClaudeConnectionReport> {
     Ok(test_connection(&cli_path).await)
