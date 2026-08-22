@@ -308,19 +308,24 @@ pub async fn chat_send(
         Ok(v) => v,
         Err(e) => {
             crate::nest_debug!("chat", "chat_send failed: {e}");
+            let cancelled = e.to_string() == "cancelled";
             {
                 let conn = state.db.lock();
                 let _ = db::finish_chat_turn(
                     &conn,
                     &turn_id,
-                    "failed",
+                    if cancelled { "cancelled" } else { "failed" },
                     None,
                     None,
-                    Some("chat_failed"),
+                    Some(if cancelled {
+                        "chat_cancelled"
+                    } else {
+                        "chat_failed"
+                    }),
                     Some(&e.to_string()),
                 );
             }
-            if e.to_string() == "cancelled" {
+            if cancelled {
                 let _ = app.emit(
                     &stream_event,
                     chat_events::ChatStreamEvent::Done {
@@ -348,16 +353,17 @@ pub async fn chat_send(
         result.thinking.is_some()
     );
 
-    let answer = result.answer;
-
     let message = {
         let mut conn = state.db.lock();
-        db::add_message(
+        db::commit_assistant_and_finish_turn(
             &mut conn,
+            &turn_id,
             &session_id,
+            "succeeded",
+            result.effective_model.as_deref(),
             db::NewChatMessage {
                 role: "assistant",
-                content: &answer,
+                content: &result.answer,
                 citations: Some(&result.citations),
                 thinking: result.thinking.as_deref(),
                 thinking_seconds: result.thinking_seconds,
@@ -365,19 +371,6 @@ pub async fn chat_send(
             },
         )
     }?;
-
-    {
-        let conn = state.db.lock();
-        db::finish_chat_turn(
-            &conn,
-            &turn_id,
-            "succeeded",
-            result.effective_model.as_deref(),
-            Some(&message.id),
-            None,
-            None,
-        )?;
-    }
 
     let _ = app.emit(
         &stream_event,

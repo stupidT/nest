@@ -796,6 +796,8 @@ fn ensure_chat_session_columns(conn: &Connection) -> AppResult<()> {
     Ok(())
 }
 
+const SESSION_COLUMNS: &str = "id, title, pinned, archived, title_source, mode, created_at, updated_at, backend, backend_status, selected_backend_id, selected_model_kind, selected_model_value, selection_revision";
+
 fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatSession> {
     let backend_raw: Option<String> = row.get(8)?;
     let backend = backend_raw
@@ -1185,13 +1187,26 @@ pub fn lexical_search(
 }
 
 pub fn create_session(conn: &Connection, title: &str) -> AppResult<ChatSession> {
+    let (backend, model) = default_selection_for_new_session(conn, &current_chat_model(conn));
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     conn.execute(
         "INSERT INTO chat_sessions (id, title, pinned, archived, title_source, mode, created_at, updated_at,
             selected_backend_id, selected_model_kind, selected_model_value, selection_revision)
-         VALUES (?1, ?2, 0, 0, ?3, 'ask', ?4, ?5, 'nest', 'default', NULL, 0)",
-        params![id, title, TITLE_SOURCE_PLACEHOLDER, now, now],
+         VALUES (?1, ?2, 0, 0, ?3, 'ask', ?4, ?5, ?6, ?7, ?8, 0)",
+        params![
+            id,
+            title,
+            TITLE_SOURCE_PLACEHOLDER,
+            now,
+            now,
+            backend.as_str(),
+            match model.kind {
+                ModelSelectionKind::Default => "default",
+                ModelSelectionKind::Explicit => "explicit",
+            },
+            model.value
+        ],
     )?;
     Ok(ChatSession {
         id,
@@ -1204,20 +1219,20 @@ pub fn create_session(conn: &Connection, title: &str) -> AppResult<ChatSession> 
         updated_at: now,
         backend: None,
         backend_status: ChatBackendStatus::Uninitialized,
-        selected_backend_id: Some("nest".to_string()),
-        selected_model: ModelSelection::default(),
+        selected_backend_id: Some(backend.as_str().to_string()),
+        selected_model: model,
         selection_revision: 0,
     })
 }
 
 pub fn get_or_create_initial_session(conn: &Connection) -> AppResult<ChatSession> {
-    let mut stmt = conn.prepare(
-        "SELECT id, title, pinned, archived, title_source, mode, created_at, updated_at, backend, backend_status, selected_backend_id, selected_model_kind, selected_model_value, selection_revision
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {SESSION_COLUMNS}
          FROM chat_sessions
          WHERE archived = 0
          ORDER BY pinned DESC, updated_at DESC
-         LIMIT 1",
-    )?;
+         LIMIT 1"
+    ))?;
     let mut rows = stmt.query([])?;
     if let Some(row) = rows.next()? {
         return Ok(map_session_row(row)?);
@@ -1228,10 +1243,10 @@ pub fn get_or_create_initial_session(conn: &Connection) -> AppResult<ChatSession
 }
 
 pub fn get_session(conn: &Connection, session_id: &str) -> AppResult<Option<ChatSession>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, title, pinned, archived, title_source, mode, created_at, updated_at, backend, backend_status, selected_backend_id, selected_model_kind, selected_model_value, selection_revision
-         FROM chat_sessions WHERE id = ?1",
-    )?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {SESSION_COLUMNS}
+         FROM chat_sessions WHERE id = ?1"
+    ))?;
     let mut rows = stmt.query(params![session_id])?;
     if let Some(row) = rows.next()? {
         Ok(Some(map_session_row(row)?))
@@ -1241,11 +1256,11 @@ pub fn get_session(conn: &Connection, session_id: &str) -> AppResult<Option<Chat
 }
 
 pub fn list_sessions(conn: &Connection) -> AppResult<Vec<ChatSession>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, title, pinned, archived, title_source, mode, created_at, updated_at, backend, backend_status, selected_backend_id, selected_model_kind, selected_model_value, selection_revision
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {SESSION_COLUMNS}
          FROM chat_sessions
-         ORDER BY pinned DESC, updated_at DESC",
-    )?;
+         ORDER BY pinned DESC, updated_at DESC"
+    ))?;
     let rows = stmt.query_map([], map_session_row)?;
     let sessions = rows.collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(sessions)
@@ -1492,6 +1507,68 @@ pub fn finish_chat_turn(
     Ok(())
 }
 
+pub fn commit_assistant_and_finish_turn(
+    conn: &mut Connection,
+    turn_id: &str,
+    session_id: &str,
+    status: &str,
+    effective_model: Option<&str>,
+    message: NewChatMessage<'_>,
+) -> AppResult<ChatMessage> {
+    let tx = conn.transaction()?;
+    let id = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+    let citations_json = message
+        .citations
+        .map(serde_json::to_string)
+        .transpose()?
+        .unwrap_or_default();
+    tx.execute(
+        "INSERT INTO chat_messages (id, session_id, role, content, citations_json, thinking, thinking_seconds, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![id, session_id, message.role, message.content, citations_json, message.thinking, message.thinking_seconds, now],
+    )?;
+    let mut summaries = Vec::with_capacity(message.file_changes.len());
+    for change in message.file_changes {
+        let change_id = Uuid::new_v4().to_string();
+        tx.execute(
+            "UPDATE chat_file_changes SET status = 'rejected' WHERE path = ?1 AND status = 'pending'",
+            params![change.path],
+        )?;
+        if change.old_content == change.new_content {
+            continue;
+        }
+        tx.execute(
+            "INSERT INTO chat_file_changes (id, message_id, path, operation, status, old_content, new_content)
+             VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6)",
+            params![change_id, id, change.path, change.operation, change.old_content, change.new_content],
+        )?;
+        summaries.push(ChatFileChangeSummary {
+            id: change_id,
+            path: change.path.clone(),
+            operation: change.operation.to_string(),
+            status: "pending".to_string(),
+        });
+    }
+    tx.execute(
+        "UPDATE chat_turns
+         SET status = ?1, effective_model = ?2, assistant_message_id = ?3, finished_at = ?4
+         WHERE id = ?5 AND status = 'running'",
+        params![status, effective_model, id, now, turn_id],
+    )?;
+    tx.commit()?;
+    Ok(ChatMessage {
+        id,
+        role: message.role.to_string(),
+        content: message.content.to_string(),
+        citations: message.citations.map(|c| c.to_vec()),
+        thinking: message.thinking.map(str::to_string),
+        thinking_seconds: message.thinking_seconds,
+        file_changes: summaries,
+        created_at: now,
+    })
+}
+
 #[allow(dead_code)]
 pub fn set_session_backend_status(
     conn: &Connection,
@@ -1563,9 +1640,6 @@ impl ClaudeModelSource {
     }
 }
 
-/// D56 model option merge: `CLI Default`, observed effective models
-/// (newest first), then custom models — deduped by exact ID with
-/// observed taking precedence over custom.
 pub fn claude_model_options(observed: &[String], custom_models: &str) -> Vec<ClaudeModelOption> {
     let mut options = vec![ClaudeModelOption {
         model_id: String::new(),
@@ -1598,9 +1672,6 @@ pub fn claude_model_options(observed: &[String], custom_models: &str) -> Vec<Cla
 
 pub const OBSERVED_MODEL_LIMIT: usize = 20;
 
-/// Newest-first distinct observed effective models for the currently
-/// configured Claude CLI path: persisted connection report first, then
-/// succeeded Claude turns.
 pub fn observed_claude_models(
     conn: &Connection,
     configured_cli_path: &str,
@@ -1860,6 +1931,7 @@ pub fn save_claude_settings(
     upsert_settings(conn, &pairs)
 }
 
+#[allow(dead_code)]
 pub fn add_message(
     conn: &mut Connection,
     session_id: &str,

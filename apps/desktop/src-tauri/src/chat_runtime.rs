@@ -184,11 +184,6 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
         }
     };
 
-    let effective_model = result
-        .model
-        .clone()
-        .or_else(|| request.requested_model.value.clone());
-
     Ok(ChatRunResult {
         answer: result.answer,
         citations: Vec::new(),
@@ -196,7 +191,7 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
         thinking_seconds: None,
         file_changes: Vec::new(),
         backend: ChatBackend::Claude,
-        effective_model,
+        effective_model: result.model,
     })
 }
 
