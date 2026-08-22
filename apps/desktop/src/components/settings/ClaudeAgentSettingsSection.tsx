@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
   AppSettings,
   ClaudeConnectionReport,
+  ClaudeDetectionDto,
 } from "@nest/shared";
 import { AlertCircle, CheckCircle2, LoaderCircle, Sparkles, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -41,6 +42,7 @@ function useClaudeAgentSettings(settingsQuery: {
     null,
   );
   const [stale, setStale] = useState(false);
+  const [detection, setDetection] = useState<ClaudeDetectionDto | null>(null);
   const [detectFailed, setDetectFailed] = useState(false);
   const [testedModel, setTestedModel] = useState<string | null>(null);
 
@@ -89,11 +91,13 @@ function useClaudeAgentSettings(settingsQuery: {
   const detect = useMutation({
     mutationFn: () => api.claudeDetectCli(draft.cliPath.trim() || undefined),
     onSuccess: (result) => {
+      setDetection(result);
       setDetectFailed(false);
       setDraft((prev) => ({ ...prev, cliPath: result.resolved_path }));
       markDirty();
     },
     onError: () => {
+      setDetection(null);
       setDetectFailed(true);
     },
   });
@@ -166,6 +170,7 @@ function useClaudeAgentSettings(settingsQuery: {
         : null;
 
   const clearDetection = () => {
+    setDetection(null);
     setDetectFailed(false);
     setTestedModel(null);
   };
@@ -183,6 +188,7 @@ function useClaudeAgentSettings(settingsQuery: {
     testResult,
     persistedStatus,
     detectFailed,
+    detection,
     observedModels,
     clearDetection,
   };
@@ -207,6 +213,7 @@ export function ClaudeAgentSettingsSection({
     testResult,
     persistedStatus,
     detectFailed,
+    detection,
     observedModels,
     clearDetection,
   } = useClaudeAgentSettings(settingsQuery);
@@ -311,6 +318,21 @@ export function ClaudeAgentSettingsSection({
               : t("settings.claude.autoDetect")}
           </Button>
         </div>
+        {!detect.isPending && detection && (
+          <p className="flex items-center gap-1.5 text-xs text-primary">
+            <CheckCircle2 className="size-3.5 shrink-0" />
+            {t("settings.claude.detectionSucceeded", {
+              version: detection.cli_version ?? "?",
+              strategy: detection.spawn_strategy,
+            })}
+          </p>
+        )}
+        {!detect.isPending && detectFailed && (
+          <p className="flex items-center gap-1.5 text-xs text-destructive">
+            <XCircle className="size-3.5 shrink-0" />
+            {t("settings.claude.detectionFailed")}
+          </p>
+        )}
       </Field>
       <Field
         label={t("settings.claude.testConnection")}

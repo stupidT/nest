@@ -62,18 +62,16 @@ export function deriveCapsules(params: {
     });
   }
 
-  const defaultLabel = activeBackendId === "claude"
-    ? claudeDefaultModelLabel ?? "CLI Default"
-    : nestModelLabel ?? "Default (API)";
-
-  const explicitModels = activeBackendId === "claude"
-    ? claudeModelIds.filter((id) => id !== defaultLabel)
-    : [];
-
-  const models: ModelOption[] = [
-    { id: "default", label: defaultLabel },
-    ...explicitModels.map((id) => ({ id, label: id })),
-  ];
+  const models: ModelOption[] =
+    activeBackendId === "claude"
+      ? [
+          {
+            id: "default",
+            label: `${claudeDefaultModelLabel ?? "CLI Default"} (default)`,
+          },
+          ...claudeModelIds.map((id) => ({ id, label: id })),
+        ]
+      : [{ id: "default", label: nestModelLabel ?? "Default (API)" }];
 
   return {
     backends,

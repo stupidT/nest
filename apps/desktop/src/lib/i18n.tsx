@@ -136,6 +136,8 @@ const messages: Record<Locale, MessageTree> = {
         modelRowLabel: "Model {{index}}",
         removeModelRow: "Remove model {{index}}",
         duplicateModel: "Duplicate",
+        detectionSucceeded: "Claude CLI {{version}} · {{strategy}}",
+        detectionFailed: "No Claude CLI found on PATH or npm locations",
         detectionFailedPlaceholder: "Auto-detect Not Found",
         detectedModels: "Detected models",
         detectedModelsDescription:

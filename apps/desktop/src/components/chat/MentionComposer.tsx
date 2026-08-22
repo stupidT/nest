@@ -85,19 +85,24 @@ export function MentionComposer({
     setHighlight(0);
   }, [mentionQuery, filtered.length]);
 
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  const consumedRef = useRef(onDraftConsumed);
+  consumedRef.current = onDraftConsumed;
   useEffect(() => {
-    if (draft) {
-      setText(draft.text);
-      setRefs(draft.refs);
-      onDraftConsumed?.();
+    if (draftRef.current) {
+      const next = draftRef.current;
+      setText(next.text);
+      setRefs(next.refs);
+      consumedRef.current?.();
       requestAnimationFrame(() => textareaRef.current?.focus());
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft]);
 
+  const draftChangeRef = useRef(onDraftChange);
+  draftChangeRef.current = onDraftChange;
   useEffect(() => {
-    onDraftChange?.({ text, refs });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    draftChangeRef.current?.({ text, refs });
   }, [text, refs]);
 
   const updateMentionFromText = (value: string, cursor: number) => {
@@ -257,7 +262,7 @@ export function MentionComposer({
           <CapsuleSelect
             ariaLabel="Chat agent"
             value={activeBackendId}
-            disabled={isGenerating || !canChangeBackend}
+            disabled={isGenerating}
             onChange={onBackendChange}
             options={backends.map((b) => ({
               value: b.id,

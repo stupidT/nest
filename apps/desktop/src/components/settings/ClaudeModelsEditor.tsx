@@ -28,10 +28,6 @@ export function ClaudeModelsEditor({
   const updateRow = (index: number, value: string) => {
     const next = [...rows];
     next[index] = value;
-    if (index === rows.length - 1 && value.trim() !== "") {
-      next.push("");
-      shouldFocusNewRow.current = true;
-    }
     onChange(next);
   };
 
@@ -61,9 +57,9 @@ export function ClaudeModelsEditor({
                 disabled={disabled}
                 onChange={(e) => updateRow(index, e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter" && index === rows.length - 1) {
+                  if (e.key === "Enter") {
                     e.preventDefault();
-                    if (row.trim() !== "") {
+                    if (row.trim() !== "" && index === rows.length - 1) {
                       addRow();
                     }
                   }

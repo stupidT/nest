@@ -78,12 +78,12 @@ describe("deriveCapsules", () => {
       nestModelLabel: "gpt-4o-mini",
     });
     expect(capsules.models).toEqual([
-      { id: "default", label: "glm-5.3[1m]" },
+      { id: "default", label: "glm-5.3[1m] (default)" },
       { id: "glm-5.3", label: "glm-5.3" },
     ]);
   });
 
-  it("drops the explicit entry duplicating the default model label", () => {
+  it("keeps the observed default model selectable as an explicit option", () => {
     const capsules = deriveCapsules({
       activeBackendId: "claude",
       boundBackend: null,
@@ -94,7 +94,8 @@ describe("deriveCapsules", () => {
       nestModelLabel: null,
     });
     expect(capsules.models).toEqual([
-      { id: "default", label: "glm-5.3[1m]" },
+      { id: "default", label: "glm-5.3[1m] (default)" },
+      { id: "glm-5.3[1m]", label: "glm-5.3[1m]" },
       { id: "glm-5.3", label: "glm-5.3" },
     ]);
   });
@@ -109,7 +110,9 @@ describe("deriveCapsules", () => {
       claudeDefaultModelLabel: null,
       nestModelLabel: null,
     });
-    expect(capsules.models).toEqual([{ id: "default", label: "CLI Default" }]);
+    expect(capsules.models).toEqual([
+      { id: "default", label: "CLI Default (default)" },
+    ]);
   });
 
   it("locks the backend capsule once bound", () => {
@@ -124,7 +127,7 @@ describe("deriveCapsules", () => {
     });
     expect(capsules.canChangeBackend).toBe(false);
     expect(capsules.models).toEqual([
-      { id: "default", label: "CLI Default" },
+      { id: "default", label: "CLI Default (default)" },
       { id: "glm-5.3", label: "glm-5.3" },
     ]);
   });

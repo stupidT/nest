@@ -73,20 +73,27 @@ describe("ClaudeModelsEditor", () => {
     expect(rowValues()).toEqual([""]);
   });
 
-  it("typing in the last empty row appends a new row and focuses it", () => {
+  it("typing in a row keeps focus and does not auto-append", () => {
     renderEditor(["glm-5.3", ""]);
     const last = inputs()[1];
     fireEvent.change(last, { target: { value: "claude-sonnet-4-5" } });
+    expect(rowValues()).toEqual(["glm-5.3", "claude-sonnet-4-5"]);
+    expect(document.activeElement).not.toBe(inputs()[1]);
+    expect(inputs()[1].value).toBe("claude-sonnet-4-5");
+  });
+
+  it("Enter in the last non-empty row adds and focuses a new row", () => {
+    renderEditor(["glm-5.3", "claude-sonnet-4-5"]);
+    const last = inputs()[1];
+    fireEvent.keyDown(last, { key: "Enter" });
     expect(rowValues()).toEqual(["glm-5.3", "claude-sonnet-4-5", ""]);
     expect(inputs()[2]).toHaveFocus();
   });
 
-  it("Enter in the last non-empty row adds and focuses a new row", () => {
-    renderEditor(["glm-5.3"]);
-    const last = inputs()[0];
-    fireEvent.keyDown(last, { key: "Enter" });
+  it("Enter in an empty last row does not add another row", () => {
+    renderEditor(["glm-5.3", ""]);
+    fireEvent.keyDown(inputs()[1], { key: "Enter" });
     expect(rowValues()).toEqual(["glm-5.3", ""]);
-    expect(inputs()[1]).toHaveFocus();
   });
 
   it("removing the last non-empty row keeps one empty row", () => {
@@ -140,6 +147,6 @@ describe("ClaudeModelsEditor", () => {
     act(() => {
       fireEvent.change(inputs()[1], { target: { value: "b" } });
     });
-    expect(rowValues()).toEqual(["a", "b", ""]);
+    expect(rowValues()).toEqual(["a", "b"]);
   });
 });
