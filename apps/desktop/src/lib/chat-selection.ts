@@ -23,7 +23,7 @@ export type SelectionCapsules = {
   canChangeBackend: boolean;
 };
 
-export const NEST_LABEL = "Nest Agent";
+export const NEST_LABEL = "NestChat";
 export const CLAUDE_LABEL = "Claude";
 
 export function deriveCapsules(params: {
