@@ -1,14 +1,12 @@
-#![allow(dead_code)]
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MergeOutcome {
     Clean(String),
     Conflicted,
 }
 
-enum Hunk<'a> {
+enum Hunk {
     Unchanged,
-    Inserted(&'a str),
+    Inserted,
     Deleted,
 }
 
@@ -16,9 +14,18 @@ fn split_lines(text: &str) -> Vec<&str> {
     text.split('\n').collect()
 }
 
-fn hunk_patch<'a>(old: &[&'a str], new: &[&'a str]) -> Vec<Hunk<'a>> {
+fn hunk_patch(old: &[&str], new: &[&str], max_cells: usize) -> Option<Vec<Hunk>> {
     let n = old.len();
     let m = new.len();
+    if n.checked_add(1)
+        .and_then(|rows| {
+            m.checked_add(1)
+                .and_then(|columns| rows.checked_mul(columns))
+        })
+        .is_none_or(|cells| cells > max_cells)
+    {
+        return None;
+    }
     let mut table = vec![vec![0u32; m + 1]; n + 1];
     for i in (0..n).rev() {
         for j in (0..m).rev() {
@@ -41,7 +48,7 @@ fn hunk_patch<'a>(old: &[&'a str], new: &[&'a str]) -> Vec<Hunk<'a>> {
             patch.push(Hunk::Deleted);
             i += 1;
         } else {
-            patch.push(Hunk::Inserted(new[j]));
+            patch.push(Hunk::Inserted);
             j += 1;
         }
     }
@@ -50,48 +57,34 @@ fn hunk_patch<'a>(old: &[&'a str], new: &[&'a str]) -> Vec<Hunk<'a>> {
         i += 1;
     }
     while j < m {
-        patch.push(Hunk::Inserted(new[j]));
+        patch.push(Hunk::Inserted);
         j += 1;
     }
-    patch
-}
-
-fn apply_patch(base: &[&str], patch: &[Hunk]) -> Option<Vec<String>> {
-    let mut result = Vec::new();
-    let mut base_idx = 0;
-    for hunk in patch {
-        match hunk {
-            Hunk::Unchanged => {
-                if base_idx >= base.len() {
-                    return None;
-                }
-                result.push(base[base_idx].to_string());
-                base_idx += 1;
-            }
-            Hunk::Deleted => {
-                if base_idx >= base.len() {
-                    return None;
-                }
-                base_idx += 1;
-            }
-            Hunk::Inserted(line) => result.push(line.to_string()),
-        }
-    }
-    if base_idx != base.len() {
-        return None;
-    }
-    Some(result)
+    Some(patch)
 }
 
 pub fn merge_text(base: &str, proposed: &str, current: &str) -> MergeOutcome {
+    merge_text_with_budget(base, proposed, current, 4_000_000)
+}
+
+fn merge_text_with_budget(
+    base: &str,
+    proposed: &str,
+    current: &str,
+    max_cells: usize,
+) -> MergeOutcome {
     if proposed == current {
         return MergeOutcome::Clean(current.to_string());
     }
     let base_lines = split_lines(base);
     let proposed_lines = split_lines(proposed);
     let current_lines = split_lines(current);
-    let proposed_patch = hunk_patch(&base_lines, &proposed_lines);
-    let current_patch = hunk_patch(&base_lines, &current_lines);
+    let Some(proposed_patch) = hunk_patch(&base_lines, &proposed_lines, max_cells) else {
+        return MergeOutcome::Conflicted;
+    };
+    let Some(current_patch) = hunk_patch(&base_lines, &current_lines, max_cells) else {
+        return MergeOutcome::Conflicted;
+    };
     let mut base_idx = 0;
     let mut proposed_hunks: Vec<(usize, usize)> = Vec::new();
     let mut current_hunks: Vec<(usize, usize)> = Vec::new();
@@ -156,7 +149,7 @@ fn collect_hunks(patch: &[Hunk], hunks: &mut Vec<(usize, usize)>, base_idx: &mut
                 }
                 *base_idx += 1;
             }
-            Hunk::Inserted(_) => {
+            Hunk::Inserted => {
                 if start.is_none() {
                     start = Some(*base_idx);
                 }
@@ -192,7 +185,7 @@ fn inserted_range(patch: &[Hunk], start: usize, end: usize) -> std::ops::Range<u
                 }
                 base_idx += 1;
             }
-            Hunk::Inserted(_) => {
+            Hunk::Inserted => {
                 if range_start.is_none() && base_idx >= start {
                     range_start = Some(new_idx);
                 }
@@ -286,5 +279,20 @@ mod tests {
     fn utf8_multibyte_lines_merge() {
         let outcome = merge_text("一\n二\n三", "改\n二\n三", "一\n二\n变");
         assert_eq!(outcome, MergeOutcome::Clean("改\n二\n变".into()));
+    }
+
+    #[test]
+    fn merge_budget_fails_closed_before_allocating_a_large_matrix() {
+        let base = (0..100)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let proposed = base.replace("line 1", "proposed");
+        let current = base.replace("line 99", "current");
+
+        assert_eq!(
+            merge_text_with_budget(&base, &proposed, &current, 100),
+            MergeOutcome::Conflicted
+        );
     }
 }

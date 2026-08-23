@@ -368,6 +368,9 @@ pub struct NewChatFileChange {
     pub operation: String,
     pub old_content: Option<String>,
     pub new_content: Option<String>,
+    pub status: String,
+    pub rebase_count: i64,
+    pub resolution_reason: Option<String>,
 }
 
 pub struct NewChatMessage<'a> {
@@ -1615,22 +1618,22 @@ pub fn commit_assistant_and_finish_turn(
     for change in message.file_changes {
         let change_id = Uuid::new_v4().to_string();
         tx.execute(
-            "UPDATE chat_file_changes SET status = 'rejected' WHERE path = ?1 AND status = 'pending'",
+            "UPDATE chat_file_changes SET status = 'rejected' WHERE path = ?1 AND status IN ('pending', 'conflicted')",
             params![change.path],
         )?;
         if change.old_content == change.new_content {
             continue;
         }
         tx.execute(
-            "INSERT INTO chat_file_changes (id, message_id, path, operation, status, old_content, new_content)
-             VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6)",
-            params![change_id, id, change.path, change.operation, change.old_content, change.new_content],
+            "INSERT INTO chat_file_changes (id, message_id, path, operation, status, old_content, new_content, rebase_count, last_rebased_at, resolution_reason)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, CASE WHEN ?8 > 0 THEN ?9 ELSE NULL END, ?10)",
+            params![change_id, id, change.path, change.operation, change.status, change.old_content, change.new_content, change.rebase_count, now, change.resolution_reason],
         )?;
         summaries.push(ChatFileChangeSummary {
             id: change_id,
             path: change.path.clone(),
             operation: change.operation.to_string(),
-            status: "pending".to_string(),
+            status: change.status.clone(),
         });
     }
     tx.execute(
@@ -2038,7 +2041,7 @@ pub fn add_message(
     for change in message.file_changes {
         let change_id = Uuid::new_v4().to_string();
         tx.execute(
-            "UPDATE chat_file_changes SET status = 'rejected' WHERE path = ?1 AND status = 'pending'",
+            "UPDATE chat_file_changes SET status = 'rejected' WHERE path = ?1 AND status IN ('pending', 'conflicted')",
             params![change.path],
         )?;
         // A follow-up Agent turn may intentionally restore the original disk
@@ -2048,22 +2051,26 @@ pub fn add_message(
             continue;
         }
         tx.execute(
-            "INSERT INTO chat_file_changes (id, message_id, path, operation, old_content, new_content)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO chat_file_changes (id, message_id, path, operation, status, old_content, new_content, rebase_count, last_rebased_at, resolution_reason)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, CASE WHEN ?8 > 0 THEN ?9 ELSE NULL END, ?10)",
             params![
                 change_id,
                 id,
                 change.path,
                 change.operation,
+                change.status,
                 change.old_content,
                 change.new_content,
+                change.rebase_count,
+                now,
+                change.resolution_reason,
             ],
         )?;
         summaries.push(ChatFileChangeSummary {
             id: change_id,
             path: change.path.clone(),
             operation: change.operation.clone(),
-            status: "pending".into(),
+            status: change.status.clone(),
         });
     }
     tx.execute(
@@ -2896,6 +2903,9 @@ mod sync_state_tests {
                     operation: "modified".into(),
                     old_content: Some("before".into()),
                     new_content: Some("after".into()),
+                    status: "pending".into(),
+                    rebase_count: 0,
+                    resolution_reason: None,
                 }],
             },
         )
@@ -2929,12 +2939,18 @@ mod sync_state_tests {
             operation: "created".into(),
             old_content: None,
             new_content: Some("draft".into()),
+            status: "pending".into(),
+            rebase_count: 0,
+            resolution_reason: None,
         }];
         let reverted = [NewChatFileChange {
             path: "sample/new.md".into(),
             operation: "modified".into(),
             old_content: None,
             new_content: None,
+            status: "pending".into(),
+            rebase_count: 0,
+            resolution_reason: None,
         }];
         for changes in [&proposed[..], &reverted[..]] {
             add_message(
@@ -2956,6 +2972,40 @@ mod sync_state_tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn conflicted_turn_proposal_persists_conflict_and_rebase_metadata() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        let session = create_session(&conn, "Agent work").unwrap();
+        let message = add_message(
+            &mut conn,
+            &session.id,
+            NewChatMessage {
+                role: "assistant",
+                content: "Conflict detected.",
+                citations: None,
+                thinking: None,
+                thinking_seconds: None,
+                file_changes: &[NewChatFileChange {
+                    path: "sample/conflict.md".into(),
+                    operation: "modified".into(),
+                    old_content: Some("direct".into()),
+                    new_content: Some("proposed".into()),
+                    status: "conflicted".into(),
+                    rebase_count: 1,
+                    resolution_reason: Some("overlap".into()),
+                }],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(message.file_changes[0].status, "conflicted");
+        let detail = get_chat_file_change(&conn, &message.file_changes[0].id).unwrap();
+        assert_eq!(detail.status, "conflicted");
+        assert_eq!(detail.rebase_count, 1);
+        assert_eq!(detail.resolution_reason.as_deref(), Some("overlap"));
     }
 
     #[test]

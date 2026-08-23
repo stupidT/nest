@@ -536,31 +536,78 @@ impl KnowledgeWorkspace {
             return Ok(Vec::new());
         }
         let root = self.state.vault_path();
-        for (path, entry) in &changes {
+        changes.sort_by(|a, b| a.0.cmp(b.0));
+        let mut proposals = Vec::with_capacity(changes.len());
+        for (path, entry) in changes {
             self.ensure_editable(path)?;
-            let current = vault::read_file(&root, path).ok();
-            if current != entry.original {
-                return Err(AppError::msg(format!(
-                    "{path} changed while the agent was working; no changes were applied"
-                )));
+            let disk = vault::read_file(&root, path).ok();
+            if let Some(proposal) = finalize_staged_file(path, entry, disk) {
+                proposals.push(proposal);
             }
         }
-        changes.sort_by(|a, b| a.0.cmp(b.0));
-        Ok(changes
-            .into_iter()
-            .map(|(path, entry)| NewChatFileChange {
-                operation: match (&entry.original, &entry.current) {
-                    (None, Some(_)) => "created",
-                    (Some(_), None) => "deleted",
-                    _ => "modified",
-                }
-                .to_string(),
-                path: path.clone(),
-                old_content: entry.original.clone(),
-                new_content: entry.current.clone(),
-            })
-            .collect())
+        Ok(proposals)
     }
+}
+
+fn operation_for(old: &Option<String>, new: &Option<String>) -> String {
+    match (old, new) {
+        (None, Some(_)) => "created",
+        (Some(_), None) => "deleted",
+        _ => "modified",
+    }
+    .to_string()
+}
+
+fn finalize_staged_file(
+    path: &str,
+    entry: &StagedFile,
+    disk: Option<String>,
+) -> Option<NewChatFileChange> {
+    if disk == entry.current {
+        return None;
+    }
+    if disk == entry.original {
+        return Some(NewChatFileChange {
+            path: path.to_string(),
+            operation: operation_for(&entry.original, &entry.current),
+            old_content: entry.original.clone(),
+            new_content: entry.current.clone(),
+            status: "pending".to_string(),
+            rebase_count: 0,
+            resolution_reason: None,
+        });
+    }
+    if let (Some(base), Some(proposed), Some(current)) = (&entry.original, &entry.current, &disk) {
+        if let crate::knowledge_merge::MergeOutcome::Clean(merged) =
+            crate::knowledge_merge::merge_text(base, proposed, current)
+        {
+            if merged == *current {
+                return None;
+            }
+            return Some(NewChatFileChange {
+                path: path.to_string(),
+                operation: operation_for(&disk, &Some(merged.clone())),
+                old_content: disk,
+                new_content: Some(merged),
+                status: "pending".to_string(),
+                rebase_count: 1,
+                resolution_reason: Some(
+                    "rebased over a direct workspace change during turn finalization".to_string(),
+                ),
+            });
+        }
+    }
+    Some(NewChatFileChange {
+        path: path.to_string(),
+        operation: operation_for(&entry.original, &entry.current),
+        old_content: disk,
+        new_content: entry.current.clone(),
+        status: "conflicted".to_string(),
+        rebase_count: 0,
+        resolution_reason: Some(
+            "staged change overlaps a direct workspace change from the same turn".to_string(),
+        ),
+    })
 }
 
 fn error_to_knowledge(error: AppError) -> KnowledgeError {
@@ -635,6 +682,82 @@ fn collect_markdown_paths(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finish_rebases_stage_over_non_overlapping_direct_change() {
+        let state = test_state_with_pack("merge-pack", "note.md", "one\ntwo\nthree");
+        let mut workspace =
+            KnowledgeWorkspace::open_turn(state.clone(), CapabilityMode::Agent, Vec::new());
+        workspace
+            .replace("merge-pack/note.md", "ONE\ntwo\nthree")
+            .unwrap();
+        std::fs::write(
+            state.vault_path().join("merge-pack/note.md"),
+            "one\ntwo\nTHREE",
+        )
+        .unwrap();
+
+        let changes = workspace.finish().unwrap();
+
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].status, "pending");
+        assert_eq!(changes[0].rebase_count, 1);
+        assert_eq!(changes[0].old_content.as_deref(), Some("one\ntwo\nTHREE"));
+        assert_eq!(changes[0].new_content.as_deref(), Some("ONE\ntwo\nTHREE"));
+    }
+
+    #[test]
+    fn finish_returns_conflicted_proposal_for_overlapping_direct_change() {
+        let state = test_state_with_pack("merge-pack", "note.md", "one\ntwo\nthree");
+        let mut workspace =
+            KnowledgeWorkspace::open_turn(state.clone(), CapabilityMode::Agent, Vec::new());
+        workspace
+            .replace("merge-pack/note.md", "one\nPROPOSED\nthree")
+            .unwrap();
+        std::fs::write(
+            state.vault_path().join("merge-pack/note.md"),
+            "one\nDIRECT\nthree",
+        )
+        .unwrap();
+
+        let changes = workspace.finish().unwrap();
+
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].status, "conflicted");
+        assert_eq!(
+            changes[0].old_content.as_deref(),
+            Some("one\nDIRECT\nthree")
+        );
+    }
+
+    fn test_state_with_pack(pack: &str, file: &str, content: &str) -> SharedState {
+        let state = std::sync::Arc::new(
+            crate::state::AppState::new(
+                std::env::temp_dir().join(format!("nest-workspace-{}", uuid::Uuid::new_v4())),
+            )
+            .unwrap(),
+        );
+        std::fs::create_dir_all(state.vault_path().join(pack)).unwrap();
+        std::fs::write(state.vault_path().join(pack).join(file), content).unwrap();
+        {
+            let conn = state.db.lock();
+            db::upsert_sync_state(
+                &conn,
+                db::SyncStateUpsert {
+                    pack_id: pack,
+                    name: pack,
+                    version: "1.0.0",
+                    local_path: pack,
+                    origin: "local",
+                    owner_id: None,
+                    description: "",
+                    patch_revision: 0,
+                },
+            )
+            .unwrap();
+        }
+        state
+    }
 
     #[test]
     fn catalog_matches_mode_capability_matrix() {
