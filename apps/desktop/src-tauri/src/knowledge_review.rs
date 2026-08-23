@@ -468,6 +468,13 @@ mod reconcile_tests {
         );
         std::fs::write(env.state.vault_path().join("p/a.md"), "one\nOTHER\nthree").unwrap();
         assert!(
+            matches!(
+                KnowledgeReview::review(&env.state, &id, true).unwrap(),
+                ReviewOutcome::Conflicted
+            ),
+            "approving after an overlapping external change must conflict, not apply"
+        );
+        assert!(
             KnowledgeReview::review(&env.state, &id, true).is_err(),
             "approving a conflicted proposal must fail outright"
         );
