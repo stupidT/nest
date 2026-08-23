@@ -28,6 +28,13 @@ The desktop app can start without the Hub service and will still include a bundl
 
 The Hub service listens on `PORT` (from `.env`, typically `8787`). Configure the desktop app's **Settings → Hub URL** to the address you want it to use, for example `http://127.0.0.1:8787` for local development. Settings is the gear at the bottom of the far-left activity bar; Account is the user icon directly above it. When no URL is configured, the Hub page's **Configure Hub URL in Settings** action opens Settings and focuses that field automatically.
 
+### Claude Agent development notes
+
+- Claude Agent requires the Claude CLI installed and logged in (`claude` on PATH, or a path configured in Settings → Claude Agent). The desktop app spawns one CLI process per turn with `--mcp-config`, `--append-system-prompt`, and an explicit `--model`.
+- On Windows, `npm run tauri dev` can pick up the Git-bundled `link.exe` and fail the Rust build. Install the Visual Studio C++ Build Tools and launch through a VS-enabled environment if that happens.
+- The loopback MCP server (`claude_mcp.rs`) binds `127.0.0.1:0` inside the app process; no extra ports need to be opened. Tool calls are authenticated with a per-turn bearer credential.
+- Debugging the webview console: start the app with `$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=9222"` and run `node scripts/cdp-watch.cjs` to stream console output and exceptions.
+
 ## Environment
 
 | App | File | Variables |
