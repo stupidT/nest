@@ -9,6 +9,7 @@ export const queryKeys = {
   catalog: ["packs"] as const,
   hubStatus: ["hub-status"] as const,
   claudeConnection: ["claude-connection"] as const,
+  workspaceHealth: ["workspace-health"] as const,
   claudeModelOptions: ["claude-model-options"] as const,
   hubAuth: ["hub-auth"] as const,
   publishReconcile: ["publish-reconcile"] as const,

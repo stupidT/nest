@@ -10,6 +10,7 @@ import type {
   ClaudeDetectionDto,
   ClaudeModelOption,
   ToolActivityRow,
+  WorkspaceHealth,
   ClaudeSettingsRequest,
   DiffPair,
   FileStatus,
@@ -121,6 +122,9 @@ export const api = {
     invoke<ClaudeConnectionReport>("claude_connection_status"),
   claudeModelOptions: () =>
     invoke<ClaudeModelOption[]>("claude_model_options"),
+  workspaceHealth: () =>
+    invoke<WorkspaceHealth>("workspace_health"),
+  workspaceReindex: () => invoke<WorkspaceHealth>("workspace_reindex"),
 
   indexStatus: () => invoke<IndexStatus>("index_status"),
   indexRebuild: () => invoke<IndexStatus>("index_rebuild"),

@@ -7,6 +7,7 @@
 
 mod chat;
 mod claude;
+mod health;
 mod hub;
 mod index;
 mod settings;
@@ -14,6 +15,7 @@ mod vault;
 
 pub use chat::*;
 pub use claude::*;
+pub use health::*;
 pub use hub::*;
 pub use index::*;
 pub use settings::*;

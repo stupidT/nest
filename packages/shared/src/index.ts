@@ -472,6 +472,12 @@ export type ToolActivityRow = {
   finished_at: string | null;
 };
 
+export type WorkspaceHealth = {
+  reindex_required: boolean;
+  reason: string | null;
+  updated_at: string | null;
+};
+
 export type Citation = {
   chunk_id: string;
   file_path: string;

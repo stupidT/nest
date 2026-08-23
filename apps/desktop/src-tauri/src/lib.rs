@@ -84,6 +84,8 @@ pub fn run() {
             commands::claude_save_settings,
             commands::claude_connection_status,
             commands::claude_model_options,
+            commands::workspace_health,
+            commands::workspace_reindex,
             commands::settings_get,
             commands::settings_preview_knowledge_dir,
             commands::settings_change_knowledge_dir,
