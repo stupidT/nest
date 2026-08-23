@@ -1,5 +1,20 @@
 # Chat and `@` References
 
+## Choose an agent and model
+
+The chat box starts with three selectors: **Agent**, **Model**, and **Mode**.
+
+- **Agent** picks the backend for the conversation. **Nest Agent** uses the
+  model configured in Settings; **Claude** routes the chat through your local
+  Claude CLI once it is enabled and connected in Settings. The choice applies
+  to a new conversation the first time you send a message; from then on that
+  conversation keeps its backend. Switching the agent mid-conversation starts
+  a new chat and carries your unsent draft over.
+- **Model** shows the model you'll get: the configured API model for Nest,
+  or for Claude the model the CLI currently uses (marked `(default)`) plus
+  any custom models you listed in Settings.
+- **Mode** is **Ask** or **Agent** as described below.
+
 ## Ask across active packs
 
 Use the selector at the lower-left of the chat box to choose a mode:

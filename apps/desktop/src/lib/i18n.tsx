@@ -101,7 +101,7 @@ const messages: Record<Locale, MessageTree> = {
       claude: {
         group: "Claude Agent",
         groupDescription:
-          "Route chat through your local Claude CLI. Ask and Agent modes behave identically on Claude; knowledge tools arrive in Step 2.",
+          "Route chat through your local Claude CLI. Knowledge tools, citations, and reviewable proposals work in both Ask and Agent modes.",
         enabled: "Enable Claude Agent",
         enabledDescription:
           "When enabled and connected, new chats bind to Claude on their first message. Existing chats keep their backend.",

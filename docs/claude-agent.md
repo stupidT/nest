@@ -57,3 +57,15 @@ References at the bottom of a reply list the files Claude actually read or searc
 ## Session continuity
 
 Each Nest chat session UUID is also the Claude session ID. The first message starts a Claude conversation with `--session-id`; later messages resume it with `--resume`, so context persists across turns. Claude sessions keep the placeholder title until renamed (Nest sessions may use LLM-generated titles); deleting a Nest session does not delete Claude's local transcript.
+
+## Bundled tutorial packs
+
+The getting-started guides shipped with every install mention the Claude Agent setup in
+[Settings and account](../examples/knowledge-packs/getting-started/1.0.0/guides/settings-and-account.md)
+and the agent/model selectors in
+[Chat and `@` references](../examples/knowledge-packs/getting-started/1.0.0/guides/chat-and-references.md).
+The Chinese edition (`getting-started-zh-cn`) mirrors both sections. These packs live in
+`examples/knowledge-packs/`, are compiled into the desktop binary, and are seeded on first
+run — when you update these guides, re-run the desktop build so the embedded copy stays in
+sync. Changing the pack contents also bumps the pack version per the
+[pack registry](./pack-registry.md) conventions when publishing.

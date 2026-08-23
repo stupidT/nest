@@ -41,3 +41,18 @@ of Settings.
 
 Chat needs an OpenAI-compatible API base URL, API key, and model name, set in
 **Settings**. These are only used when you use Chat.
+
+## Claude Agent (optional)
+
+To chat through your local Claude CLI instead of an API, enable **Claude
+Agent** in Settings, leave the CLI path empty for auto-detect (or point it
+at your `claude` executable), and choose **Save and connect**. Saving
+verifies the CLI, runs a real test message, and exercises all of Nest's
+knowledge tools in a temporary pack before reporting success.
+
+List frequently used model IDs under **Custom models**; models observed from
+successful tests and chats appear automatically under **Detected models** and
+can be picked in the chat box without adding them above.
+
+See the guide [Chat and `@` References](./chat-and-references.md) for how
+the agent selector works in the chat box.
