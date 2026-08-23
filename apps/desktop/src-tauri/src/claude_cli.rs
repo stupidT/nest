@@ -445,7 +445,7 @@ pub enum ClaudeTurnError {
 pub type InitializedCallback<'a> =
     Box<dyn Fn(&str, Option<&str>, Option<&str>) -> Result<(), String> + Send + Sync + 'a>;
 
-pub type ToolCallback = Box<dyn Fn(&str, Option<&str>) + Send + Sync>;
+pub type ToolCallback = Box<dyn Fn(&str, Option<&str>, bool) + Send + Sync>;
 
 pub struct TurnEvents {
     pub token: Box<dyn Fn(&str) + Send + Sync>,
@@ -459,7 +459,7 @@ impl Default for TurnEvents {
         Self {
             token: Box::new(|_| {}),
             thinking: Box::new(|_| {}),
-            tool: Box::new(|_, _| {}),
+            tool: Box::new(|_, _, _| {}),
             initialized: Box::new(|_, _, _| Ok(())),
         }
     }
@@ -1014,7 +1014,10 @@ async fn execute_single_turn(
                             Ok(Some(ParserEvent::Token(text))) => (events.token)(&text),
                             Ok(Some(ParserEvent::Thinking(text))) => (events.thinking)(&text),
                             Ok(Some(ParserEvent::ToolCall { name, target })) => {
-                                (events.tool)(&name, target.as_deref());
+                                (events.tool)(&name, target.as_deref(), false);
+                            }
+                            Ok(Some(ParserEvent::ToolResult)) => {
+                                (events.tool)("", None, true);
                             }
                             Ok(Some(ParserEvent::Initialized { session_id, model, cli_version })) => {
                                 if let Err(message) = (events.initialized)(
@@ -1141,6 +1144,7 @@ pub enum ParserEvent {
         name: String,
         target: Option<String>,
     },
+    ToolResult,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1248,12 +1252,30 @@ impl StreamParser {
             "system" => self.handle_system(&value),
             "stream_event" => self.handle_stream_event(&value),
             "assistant" => self.handle_assistant(&value),
+            "user" => {
+                if self.has_tool_result(&value) {
+                    Ok(Some(ParserEvent::ToolResult))
+                } else {
+                    Ok(None)
+                }
+            }
             "result" => {
                 self.handle_result(&value)?;
                 Ok(None)
             }
             _ => Ok(None),
         }
+    }
+
+    fn has_tool_result(&self, value: &serde_json::Value) -> bool {
+        value
+            .pointer("/message/content")
+            .and_then(|content| content.as_array())
+            .is_some_and(|blocks| {
+                blocks
+                    .iter()
+                    .any(|block| block.get("type").and_then(|v| v.as_str()) == Some("tool_result"))
+            })
     }
 
     fn handle_system(

@@ -472,6 +472,15 @@ export function ChatPanel() {
           if (event.type === "reading") {
             setAgentActivity({ kind: "reading", path: event.path });
           } else if (event.type === "tool_activity") {
+            if (event.done && !event.label) {
+              setLiveFileActivities((current) =>
+                current.map((item) => ({ ...item, staged: true })),
+              );
+              setAgentActivity((prev) =>
+                prev?.kind === "reading" ? prev : { kind: "generating" },
+              );
+              return;
+            }
             const tool = event.label.replace(/^mcp__nest__/, "");
             setAgentActivity((prev) =>
               prev?.kind === "reading" ? prev : { kind: "generating" },

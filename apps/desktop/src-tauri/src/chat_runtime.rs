@@ -154,7 +154,32 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
                 },
             );
         }),
-        tool: Box::new(move |name, target| {
+        tool: Box::new(move |name, target, done| {
+            if done {
+                let _ = app_tool.emit(
+                    &stream_tool,
+                    ChatStreamEvent::ToolActivity {
+                        label: String::new(),
+                        target: None,
+                        done: true,
+                    },
+                );
+                return;
+            }
+            if name.starts_with("mcp__nest__") {
+                let sequence = tool_sequence.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let conn = state_for_tools.db.lock();
+                let _ = db::insert_tool_activity(
+                    &conn,
+                    &turn_id_for_tools,
+                    sequence,
+                    "nest_mcp",
+                    tool_kind_for(name),
+                    name,
+                    target,
+                );
+                return;
+            }
             let _ = app_tool.emit(
                 &stream_tool,
                 ChatStreamEvent::ToolActivity {
@@ -169,7 +194,7 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
                 &conn,
                 &turn_id_for_tools,
                 sequence,
-                "nest_mcp",
+                "claude_native",
                 tool_kind_for(name),
                 name,
                 target,
