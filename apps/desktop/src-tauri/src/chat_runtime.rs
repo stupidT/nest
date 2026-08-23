@@ -42,6 +42,7 @@ pub fn claude_mode_for(session: &ChatSession) -> Option<TurnMode> {
 }
 
 pub async fn run_chat(request: ChatRunRequest) -> Result<ChatRunResult, crate::error::AppError> {
+    crate::vault_reconciliation::ensure_workspace_healthy(&request.state)?;
     match request.session.backend {
         Some(ChatBackend::Nest) => run_nest(request).await,
         Some(ChatBackend::Claude) => run_claude(request).await,
@@ -249,6 +250,12 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
                 let conn = state.db.lock();
                 let _ = db::finalize_running_tool_activities(&conn, &request.turn_id, "failed");
             }
+            if let Err(reconcile_error) = crate::vault_reconciliation::reconcile_vault(&state) {
+                let _ = crate::vault_reconciliation::set_reindex_required(
+                    &state,
+                    &format!("workspace_reconciliation_failed: {reconcile_error}"),
+                );
+            }
             let mapped = map_turn_error(&error);
             if is_unresumable_failure(&error) {
                 let updated = {
@@ -305,7 +312,12 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
         let conn = state.db.lock();
         let _ = db::finalize_running_tool_activities(&conn, &request.turn_id, "succeeded");
     }
-    crate::indexing::schedule(&state)?;
+    if let Err(error) = crate::vault_reconciliation::reconcile_vault(&state) {
+        let _ = crate::vault_reconciliation::set_reindex_required(
+            &state,
+            &format!("workspace_reconciliation_failed: {error}"),
+        );
+    }
 
     Ok(ChatRunResult {
         answer: result.answer,

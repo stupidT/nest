@@ -25,6 +25,7 @@ mod state;
 mod title;
 mod tray;
 mod vault;
+mod vault_reconciliation;
 mod vector_store;
 
 use state::{AppState, SharedState};
@@ -45,6 +46,13 @@ pub fn run() {
             let state = AppState::new(app_data)?;
             app.manage(Arc::new(state) as SharedState);
             let shared_state = app.state::<SharedState>();
+            if let Err(error) = vault_reconciliation::reconcile_vault(&shared_state) {
+                nest_debug!("app", "startup reconciliation failed: {error}");
+                let _ = vault_reconciliation::set_reindex_required(
+                    &shared_state,
+                    &format!("startup reconciliation failed: {error}"),
+                );
+            }
             if indexing::status(&shared_state)?.indexed_chunks == 0 {
                 indexing::schedule(&shared_state)?;
             }
