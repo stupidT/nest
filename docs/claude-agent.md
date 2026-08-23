@@ -60,11 +60,13 @@ Each Nest chat session UUID is also the Claude session ID. The first message sta
 
 ## Bundled tutorial packs
 
-The getting-started guides shipped with every install mention the Claude Agent setup in
+The getting-started guides shipped with every install cover agents in the dedicated
+[Agents guide](../examples/knowledge-packs/getting-started/1.0.0/guides/agents.md)
+(both backends, binding, models, and tool semantics), with setup pointers in
 [Settings and account](../examples/knowledge-packs/getting-started/1.0.0/guides/settings-and-account.md)
-and the agent/model selectors in
+and selector basics in
 [Chat and `@` references](../examples/knowledge-packs/getting-started/1.0.0/guides/chat-and-references.md).
-The Chinese edition (`getting-started-zh-cn`) mirrors both sections. These packs live in
+The Chinese edition (`getting-started-zh-cn`) mirrors all three. These packs live in
 `examples/knowledge-packs/`, are compiled into the desktop binary, and are seeded on first
 run — when you update these guides, re-run the desktop build so the embedded copy stays in
 sync. Changing the pack contents also bumps the pack version per the
