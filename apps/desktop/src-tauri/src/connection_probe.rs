@@ -222,6 +222,110 @@ async fn run_claude_driven_probe(
         };
     }
 
+    let mut failures = Vec::new();
+
+    let staged1 = server.finish_staged().unwrap_or_default();
+    server.end_turn();
+
+    let called1 = {
+        let conn = state.db.lock();
+        crate::db::list_tool_activities(&conn, &env.probe_turn_id)
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|row| (row.label, row.status))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+    drop(called1);
+
+    let turn1_create_ok = staged1.iter().any(|c| {
+        c.operation == "created"
+            && c.path == env.probe_path
+            && c.new_content
+                .as_deref()
+                .map(|t| t.contains(&env.challenge))
+                .unwrap_or(false)
+    });
+    if !turn1_create_ok {
+        failures.push(
+            "probe turn 1 did not stage a knowledge_create containing the marker".to_string(),
+        );
+    }
+
+    let probe_turn2_id = uuid::Uuid::new_v4().to_string();
+    {
+        let conn = state.db.lock();
+        let message_id = uuid::Uuid::new_v4().to_string();
+        let _ = conn.execute(
+            "INSERT INTO chat_messages (id, session_id, role, content, citations_json, created_at)
+             VALUES (?1, ?2, 'user', 'probe-2', '', ?3)",
+            rusqlite::params![
+                message_id,
+                env.probe_session,
+                chrono::Utc::now().to_rfc3339()
+            ],
+        );
+        let _ = conn.execute(
+            "INSERT INTO chat_turns (id, session_id, user_message_id, backend_id,
+                requested_model_kind, mode, selection_revision, status, started_at)
+             VALUES (?1, ?2, ?3, 'claude', 'default', 'agent', 0, 'running', ?4)",
+            rusqlite::params![
+                probe_turn2_id,
+                env.probe_session,
+                message_id,
+                chrono::Utc::now().to_rfc3339()
+            ],
+        );
+    }
+
+    let credential2 = match server.begin_turn(
+        &env.probe_session,
+        &probe_turn2_id,
+        CapabilityMode::Agent,
+        Vec::new(),
+    ) {
+        Ok(credential) => credential,
+        Err(error) => {
+            server.clear_event_sink();
+            failures.push(error);
+            let outcome = cleanup(
+                &state,
+                &env.pack_dir,
+                &env.probe_session,
+                &env.probe_turn_id,
+                handle.clone(),
+            )
+            .await;
+            return ProbeOutcome {
+                tools_exercised: Vec::new(),
+                failures,
+                cleanup_warnings: outcome,
+            };
+        }
+    };
+    let config2_path = std::env::temp_dir().join(format!(
+        "nest-probe-mcp-{}.json",
+        uuid::Uuid::new_v4().simple()
+    ));
+    if let Err(error) = std::fs::write(&config2_path, handle.config_json(&credential2)) {
+        server.clear_event_sink();
+        failures.push(format!("probe mcp config write failed: {error}"));
+        let outcome = cleanup(
+            &state,
+            &env.pack_dir,
+            &env.probe_session,
+            &env.probe_turn_id,
+            handle.clone(),
+        )
+        .await;
+        return ProbeOutcome {
+            tools_exercised: Vec::new(),
+            failures,
+            cleanup_warnings: outcome,
+        };
+    }
+
     let turn2_prompt = format!(
         "Using the Nest knowledge tools only:\n\
          1. knowledge_search for the marker {marker}\n\
@@ -241,33 +345,37 @@ async fn run_claude_driven_probe(
             prompt: &turn2_prompt,
             model: None,
             chat_mode: CapabilityMode::Agent,
-            mcp_config_path: Some(env.config_path.as_path()),
+            mcp_config_path: Some(config2_path.as_path()),
             system_instructions: None,
         },
         &crate::claude_cli::TurnEvents::default(),
         &never_cancel(),
     )
     .await;
-
-    let staged = server.finish_staged().unwrap_or_default();
-    server.end_turn();
-    server.clear_event_sink();
-    let _ = std::fs::remove_file(&env.config_path);
-
-    let mut failures = Vec::new();
     if let Err(error) = turn2 {
         failures.push(format!("probe turn 2 failed: {error}"));
     }
 
+    let staged2 = server.finish_staged().unwrap_or_default();
+    let turn2_delete_ok = staged2
+        .iter()
+        .any(|c| c.operation == "deleted" && c.path == env.probe_path);
+    if !turn2_delete_ok {
+        failures.push("probe turn 2 did not stage a knowledge_delete".to_string());
+    }
+    server.end_turn();
+    server.clear_event_sink();
+    let _ = std::fs::remove_file(&config2_path);
+    let _ = std::fs::remove_file(&env.config_path);
+
     let called = {
         let conn = state.db.lock();
-        crate::db::list_tool_activities(&conn, &env.probe_turn_id)
-            .map(|rows| {
-                rows.into_iter()
-                    .map(|row| (row.label, row.status))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default()
+        let mut all =
+            crate::db::list_tool_activities(&conn, &env.probe_turn_id).unwrap_or_default();
+        all.extend(crate::db::list_tool_activities(&conn, &probe_turn2_id).unwrap_or_default());
+        all.into_iter()
+            .map(|row| (row.label, row.status))
+            .collect::<Vec<_>>()
     };
     let required = [
         "knowledge_create",
@@ -290,26 +398,14 @@ async fn run_claude_driven_probe(
         }
     }
 
-    let probe_file = state.vault_path().join(&env.probe_path);
-    if probe_file.exists() && !staged.is_empty() {
-        failures.push("probe file still present after staged delete".to_string());
-    }
-
-    let disk_after = std::fs::read_to_string(&probe_file).ok();
-    if tools_exercised.len() == 6 {
-        let marker_seen = staged.iter().any(|change| {
-            change
-                .new_content
-                .as_deref()
-                .map(|c| c.contains(&env.challenge))
-                .unwrap_or(false)
-        }) || disk_after
+    let marker_seen = staged1.iter().any(|c| {
+        c.new_content
             .as_deref()
-            .map(|content| content.contains(&env.challenge))
-            .unwrap_or(false);
-        if !marker_seen {
-            failures.push("probe marker not found in staged or disk content".to_string());
-        }
+            .map(|t| t.contains(&env.challenge))
+            .unwrap_or(false)
+    });
+    if !marker_seen {
+        failures.push("probe marker not found in staged create content".to_string());
     }
 
     let native_reads = called
@@ -337,6 +433,13 @@ async fn run_claude_driven_probe(
         handle.clone(),
     )
     .await;
+    if let Err(error) = crate::db::finalize_running_tool_activities(
+        &(state.db.lock()),
+        &probe_turn2_id,
+        "succeeded",
+    ) {
+        let _ = error;
+    }
 
     ProbeOutcome {
         tools_exercised,
