@@ -442,6 +442,37 @@ pub enum ClaudeTurnError {
     },
 }
 
+impl std::fmt::Display for ClaudeTurnError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ClaudeTurnError::Cancelled => write!(f, "cancelled"),
+            ClaudeTurnError::SpawnFailed { message } => write!(f, "spawn failed: {message}"),
+            ClaudeTurnError::Io { message } => write!(f, "io error: {message}"),
+            ClaudeTurnError::InitPersist { message } => write!(f, "init persist failed: {message}"),
+            ClaudeTurnError::Protocol { message } => write!(f, "protocol error: {message}"),
+            ClaudeTurnError::SessionMismatch { message } => {
+                write!(f, "session mismatch: {message}")
+            }
+            ClaudeTurnError::Process { stderr_tail, .. } => {
+                write!(f, "process failed, stderr: {stderr_tail}")
+            }
+            ClaudeTurnError::CliError {
+                code,
+                subtype,
+                sanitized_result,
+                ..
+            } => {
+                let detail = sanitized_result
+                    .as_deref()
+                    .filter(|text| !text.is_empty())
+                    .map(|text| format!(": {text}"))
+                    .unwrap_or_default();
+                write!(f, "{code}: {subtype}{detail}")
+            }
+        }
+    }
+}
+
 pub type InitializedCallback<'a> =
     Box<dyn Fn(&str, Option<&str>, Option<&str>) -> Result<(), String> + Send + Sync + 'a>;
 
@@ -532,6 +563,11 @@ fn turn_args(
         args.push(config_path.display().to_string());
         if chat_mode == crate::knowledge_workspace::CapabilityMode::Ask {
             args.push("--strict-mcp-config".to_string());
+            args.push("--tools".to_string());
+            args.push(
+                "Read,Grep,Glob,LS,WebSearch,WebFetch,mcp__nest__knowledge_search,mcp__nest__knowledge_list,mcp__nest__knowledge_read"
+                    .to_string(),
+            );
         }
         args.push("--allowedTools".to_string());
         if chat_mode == crate::knowledge_workspace::CapabilityMode::Ask {

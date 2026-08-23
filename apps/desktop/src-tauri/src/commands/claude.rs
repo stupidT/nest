@@ -237,7 +237,12 @@ async fn minimal_round_trip(
             .await;
     match outcome {
         Ok(result) => {
-            let probe = crate::connection_probe::run_six_tool_probe(state.clone(), None).await;
+            let probe = crate::connection_probe::run_six_tool_probe(
+                state.clone(),
+                None,
+                Some(configured_path.to_string()),
+            )
+            .await;
             if !probe.failures.is_empty() {
                 return Some(unavailable_report(
                     configured_path,

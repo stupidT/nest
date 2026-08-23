@@ -7,6 +7,7 @@ mod claude_cli;
 mod claude_mcp;
 mod commands;
 mod connection_probe;
+mod connection_probe_direct;
 mod db;
 mod debug;
 mod default_pack;

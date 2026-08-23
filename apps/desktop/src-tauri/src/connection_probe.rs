@@ -1,7 +1,9 @@
 use crate::claude_mcp::{start_server, McpServerState, ToolEventSink};
 use crate::knowledge_workspace::CapabilityMode;
 use crate::state::SharedState;
-use serde_json::{json, Value};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
 pub struct ProbeOutcome {
     #[allow(dead_code)]
@@ -12,10 +14,45 @@ pub struct ProbeOutcome {
 
 pub type SinkBuilder = Box<dyn FnOnce() -> ToolEventSink + Send>;
 
+const PROBE_TIMEOUT: Duration = Duration::from_secs(300);
+
 pub async fn run_six_tool_probe(
     state: SharedState,
     sink_builder: Option<SinkBuilder>,
+    cli_path: Option<String>,
 ) -> ProbeOutcome {
+    match cli_path.as_deref() {
+        Some(path) => run_claude_driven_probe(state, sink_builder, path).await,
+        None => crate::connection_probe_direct::run_direct_probe(state, sink_builder).await,
+    }
+}
+
+struct ProbeEnv {
+    probe_session: String,
+    pack_dir: String,
+    probe_path: String,
+    challenge: String,
+    config_path: PathBuf,
+}
+
+async fn run_claude_driven_probe(
+    state: SharedState,
+    sink_builder: Option<SinkBuilder>,
+    cli_path: &str,
+) -> ProbeOutcome {
+    let detections =
+        match crate::claude_cli::detect_cli(Some(std::path::Path::new(cli_path.trim()))) {
+            Ok(detections) if !detections.is_empty() => detections,
+            _ => {
+                return ProbeOutcome {
+                    tools_exercised: Vec::new(),
+                    failures: vec!["invalid_cli_path: CLI not found for probe".to_string()],
+                    cleanup_warnings: Vec::new(),
+                };
+            }
+        };
+    let detection = detections[0].clone();
+
     let server = McpServerState::new(state.clone());
     if let Some(builder) = sink_builder {
         server.set_event_sink(builder());
@@ -35,15 +72,16 @@ pub async fn run_six_tool_probe(
     let pack_dir = format!("__probe_{probe_session}");
     let pack_root = state.vault_path().join(&pack_dir);
     if let Err(error) = std::fs::create_dir_all(&pack_root) {
+        let _ = handle.stop().await;
         return ProbeOutcome {
             tools_exercised: Vec::new(),
             failures: vec![format!("probe pack creation failed: {error}")],
             cleanup_warnings: Vec::new(),
         };
     }
-    {
+    let registration = {
         let conn = state.db.lock();
-        if let Err(error) = crate::db::upsert_sync_state(
+        crate::db::upsert_sync_state(
             &conn,
             crate::db::SyncStateUpsert {
                 pack_id: &pack_dir,
@@ -52,29 +90,27 @@ pub async fn run_six_tool_probe(
                 local_path: &pack_dir,
                 origin: "local",
                 owner_id: None,
-                description: "Temporary pack for the Save and connect probe",
+                description: "",
                 patch_revision: 0,
             },
-        ) {
-            return ProbeOutcome {
-                tools_exercised: Vec::new(),
-                failures: vec![format!("probe pack registration failed: {error}")],
-                cleanup_warnings: Vec::new(),
-            };
-        }
+        )
+    };
+    if let Err(error) = registration {
+        let _ = handle.stop().await;
+        return ProbeOutcome {
+            tools_exercised: Vec::new(),
+            failures: vec![format!("probe pack registration failed: {error}")],
+            cleanup_warnings: Vec::new(),
+        };
     }
-    let create_path = format!("{pack_dir}/probe.md");
+
+    let probe_path = format!("{pack_dir}/probe.md");
     let challenge = format!("nest-probe-{}", uuid::Uuid::new_v4().simple());
     let credential =
         match server.begin_turn(&probe_session, "probe", CapabilityMode::Agent, Vec::new()) {
             Ok(credential) => credential,
             Err(error) => {
-                let _ = std::fs::remove_dir_all(state.vault_path().join(&pack_dir));
-                {
-                    let conn = state.db.lock();
-                    let _ = crate::db::purge_path_data(&conn, &pack_dir);
-                }
-                handle.stop().await;
+                cleanup(&state, &pack_dir, handle.clone()).await;
                 return ProbeOutcome {
                     tools_exercised: Vec::new(),
                     failures: vec![error],
@@ -82,187 +118,169 @@ pub async fn run_six_tool_probe(
                 };
             }
         };
-    let client = reqwest::Client::new();
-    let url = format!("http://127.0.0.1:{}/mcp", handle.port);
-    let auth = format!("Bearer {credential}");
-
-    let mut tools_exercised: Vec<String> = Vec::new();
-    let mut failures: Vec<String> = Vec::new();
-
-    async fn call_tool(
-        client: &reqwest::Client,
-        url: &str,
-        auth: &str,
-        name: &str,
-        args: Value,
-    ) -> Result<Value, String> {
-        let response = client
-            .post(url)
-            .header("Authorization", auth)
-            .json(&json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "tools/call",
-                "params": { "name": name, "arguments": args }
-            }))
-            .send()
-            .await
-            .map_err(|error| error.to_string())?;
-        response
-            .json::<Value>()
-            .await
-            .map_err(|error| error.to_string())
+    let config_path = std::env::temp_dir().join(format!(
+        "nest-probe-mcp-{}.json",
+        uuid::Uuid::new_v4().simple()
+    ));
+    if let Err(error) = std::fs::write(&config_path, handle.config_json(&credential)) {
+        cleanup(&state, &pack_dir, handle.clone()).await;
+        return ProbeOutcome {
+            tools_exercised: Vec::new(),
+            failures: vec![format!("probe mcp config write failed: {error}")],
+            cleanup_warnings: Vec::new(),
+        };
     }
 
-    fn tool_error(body: &Value) -> Option<String> {
-        if body
-            .pointer("/result/isError")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
-            Some(
-                body.pointer("/result/content/0/text")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown error")
-                    .to_string(),
-            )
-        } else {
-            None
-        }
-    }
+    let env = ProbeEnv {
+        probe_session,
+        pack_dir,
+        probe_path,
+        challenge,
+        config_path,
+    };
 
-    let create = call_tool(
-        &client,
-        &url,
-        &auth,
-        "knowledge_create",
-        json!({
-            "path": create_path,
-            "content": format!("# Probe\n\n{challenge}\n")
-        }),
-    )
-    .await;
-    match create {
-        Ok(body) => match tool_error(&body) {
-            None => tools_exercised.push("knowledge_create".to_string()),
-            Some(error) => failures.push(format!("knowledge_create: {error}")),
+    let turn1_prompt = format!(
+        "Use the Nest knowledge tools to do exactly these steps, in order:\n\
+         1. knowledge_create at path {path} with this exact marker on its own line: {marker}\n\
+         2. knowledge_list filtered to {pack}\n\
+         3. knowledge_read {path}\n\
+         4. knowledge_replace {path} changing the marker line to {marker2}\n\
+         Use only the Nest MCP tools (mcp__nest__*), not your native file tools. Reply with a one-line confirmation of each step.",
+        path = env.probe_path,
+        marker = env.challenge,
+        marker2 = format!("{}-v2", env.challenge),
+        pack = env.pack_dir,
+    );
+
+    let turn1 = crate::claude_cli::run_turn(
+        &detection,
+        crate::claude_cli::ClaudeTurnRequest {
+            vault_root: &state.vault_path(),
+            session_id: &env.probe_session,
+            mode: crate::claude_cli::TurnMode::NewSession,
+            prompt: &turn1_prompt,
+            model: None,
+            chat_mode: CapabilityMode::Agent,
+            mcp_config_path: Some(env.config_path.as_path()),
+            system_instructions: None,
         },
-        Err(error) => failures.push(format!("knowledge_create: {error}")),
-    }
-
-    let list = call_tool(
-        &client,
-        &url,
-        &auth,
-        "knowledge_list",
-        json!({ "query": &pack_dir }),
+        &crate::claude_cli::TurnEvents::default(),
+        &never_cancel(),
     )
     .await;
-    match list {
-        Ok(body) => match tool_error(&body) {
-            None => tools_exercised.push("knowledge_list".to_string()),
-            Some(error) => failures.push(format!("knowledge_list: {error}")),
+    if let Err(error) = turn1 {
+        server.end_turn();
+        server.clear_event_sink();
+        let outcome = cleanup(&state, &env.pack_dir, handle.clone()).await;
+        return ProbeOutcome {
+            tools_exercised: Vec::new(),
+            failures: vec![format!("probe turn 1 failed: {error}")],
+            cleanup_warnings: outcome,
+        };
+    }
+
+    let turn2_prompt = format!(
+        "Using the Nest knowledge tools only:\n\
+         1. knowledge_search for the marker {marker}\n\
+         2. knowledge_read {path} to confirm the current marker\n\
+         3. knowledge_delete {path}\n\
+         Reply with a one-line confirmation of each step.",
+        marker = format!("{}-v2", env.challenge),
+        path = env.probe_path,
+    );
+
+    let turn2 = crate::claude_cli::run_turn(
+        &detection,
+        crate::claude_cli::ClaudeTurnRequest {
+            vault_root: &state.vault_path(),
+            session_id: &env.probe_session,
+            mode: crate::claude_cli::TurnMode::Resume,
+            prompt: &turn2_prompt,
+            model: None,
+            chat_mode: CapabilityMode::Agent,
+            mcp_config_path: Some(env.config_path.as_path()),
+            system_instructions: None,
         },
-        Err(error) => failures.push(format!("knowledge_list: {error}")),
-    }
-
-    let read = call_tool(
-        &client,
-        &url,
-        &auth,
-        "knowledge_read",
-        json!({ "path": &create_path }),
+        &crate::claude_cli::TurnEvents::default(),
+        &never_cancel(),
     )
     .await;
-    match read {
-        Ok(body) => {
-            let error = tool_error(&body);
-            let text = body
-                .pointer("/result/content/0/text")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            match error {
-                None if text.contains(&challenge) => {
-                    tools_exercised.push("knowledge_read".to_string())
-                }
-                None => failures.push("knowledge_read: challenge text not returned".to_string()),
-                Some(error) => failures.push(format!("knowledge_read: {error}")),
-            }
-        }
-        Err(error) => failures.push(format!("knowledge_read: {error}")),
-    }
 
-    let replaced = format!("{challenge}-replaced");
-    let replace = call_tool(
-        &client,
-        &url,
-        &auth,
-        "knowledge_replace",
-        json!({
-            "path": &create_path,
-            "content": format!("# Probe\n\n{replaced}\n")
-        }),
-    )
-    .await;
-    match replace {
-        Ok(body) => match tool_error(&body) {
-            None => tools_exercised.push("knowledge_replace".to_string()),
-            Some(error) => failures.push(format!("knowledge_replace: {error}")),
-        },
-        Err(error) => failures.push(format!("knowledge_replace: {error}")),
-    }
-
-    let delete = call_tool(
-        &client,
-        &url,
-        &auth,
-        "knowledge_delete",
-        json!({ "path": &create_path }),
-    )
-    .await;
-    match delete {
-        Ok(body) => match tool_error(&body) {
-            None => tools_exercised.push("knowledge_delete".to_string()),
-            Some(error) => failures.push(format!("knowledge_delete: {error}")),
-        },
-        Err(error) => failures.push(format!("knowledge_delete: {error}")),
-    }
-
-    let search = call_tool(
-        &client,
-        &url,
-        &auth,
-        "knowledge_search",
-        json!({ "query": "probe challenge that does not exist" }),
-    )
-    .await;
-    match search {
-        Ok(body) => match tool_error(&body) {
-            None => tools_exercised.push("knowledge_search".to_string()),
-            Some(error) => failures.push(format!("knowledge_search: {error}")),
-        },
-        Err(error) => failures.push(format!("knowledge_search: {error}")),
-    }
-
-    let _ = server.finish_staged();
-    server.abort_staged();
+    let staged = server.finish_staged().unwrap_or_default();
     server.end_turn();
     server.clear_event_sink();
-    handle.stop().await;
+    let _ = std::fs::remove_file(&env.config_path);
 
-    let probe_root = state.vault_path().join(&pack_dir);
-    let mut cleanup_warnings = Vec::new();
-    if probe_root.exists() {
-        if let Err(error) = std::fs::remove_dir_all(&probe_root) {
-            cleanup_warnings.push(format!("probe cleanup failed: {error}"));
-        }
+    let mut failures = Vec::new();
+    if let Err(error) = turn2 {
+        failures.push(format!("probe turn 2 failed: {error}"));
     }
-    {
+
+    let called = {
         let conn = state.db.lock();
-        if let Err(error) = crate::db::purge_path_data(&conn, &pack_dir) {
-            cleanup_warnings.push(format!("probe pack deregistration failed: {error}"));
+        crate::db::list_tool_activities(&conn, "probe")
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|row| (row.label, row.status))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+    let required = [
+        "mcp__nest__knowledge_create",
+        "mcp__nest__knowledge_list",
+        "mcp__nest__knowledge_read",
+        "mcp__nest__knowledge_replace",
+        "mcp__nest__knowledge_search",
+        "mcp__nest__knowledge_delete",
+    ];
+    let mut tools_exercised = Vec::new();
+    for tool in required {
+        let seen = called
+            .iter()
+            .any(|(label, status)| label == tool && status == "succeeded");
+        if seen {
+            tools_exercised.push(tool.to_string());
+        } else {
+            failures.push(format!("nest tool not exercised by Claude: {tool}"));
         }
     }
+
+    let probe_file = state.vault_path().join(&env.probe_path);
+    if probe_file.exists() && !staged.is_empty() {
+        failures.push("probe file still present after staged delete".to_string());
+    }
+
+    let disk_after = std::fs::read_to_string(&probe_file).ok();
+    if tools_exercised.contains(&"mcp__nest__knowledge_create".to_string())
+        && tools_exercised.contains(&"mcp__nest__knowledge_read".to_string())
+    {
+        let marker_seen = disk_after
+            .as_deref()
+            .map(|content| content.contains(&env.challenge))
+            .unwrap_or(false);
+        if !marker_seen && !staged.is_empty() {
+            failures.push("probe marker not verified through knowledge_read".to_string());
+        }
+    }
+
+    let native_reads = called
+        .iter()
+        .filter(|(label, _)| {
+            !label.starts_with("mcp__nest__")
+                && matches!(
+                    label.to_ascii_lowercase().as_str(),
+                    "read" | "edit" | "write" | "bash"
+                )
+        })
+        .count();
+    if native_reads > 0 {
+        failures.push(format!(
+            "nest_tool_route_bypassed: Claude used native file tools {native_reads} times during the probe"
+        ));
+    }
+
+    let cleanup_warnings = cleanup(&state, &env.pack_dir, handle.clone()).await;
 
     ProbeOutcome {
         tools_exercised,
@@ -271,30 +289,29 @@ pub async fn run_six_tool_probe(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+fn never_cancel() -> crate::claude_cli::CancelToken {
+    Arc::new(std::sync::atomic::AtomicBool::new(false))
+}
 
-    #[tokio::test]
-    async fn probe_exercises_all_six_tools_against_temp_vault() {
-        let root = std::env::temp_dir().join(format!("nest-probe-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        let state = crate::state::AppState::new(root.clone()).expect("test state");
-        let outcome = run_six_tool_probe(Arc::new(state), None).await;
-        assert!(
-            outcome.failures.is_empty(),
-            "failures: {:?}",
-            outcome.failures
-        );
-        assert_eq!(
-            outcome.tools_exercised.len(),
-            6,
-            "{:?}",
-            outcome.tools_exercised
-        );
-        assert!(outcome.cleanup_warnings.is_empty());
-        let _ = std::fs::remove_dir_all(&root);
+async fn cleanup(
+    state: &SharedState,
+    pack_dir: &str,
+    handle: crate::claude_mcp::McpServerHandle,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let root = state.vault_path().join(pack_dir);
+    if root.exists() {
+        if let Err(error) = std::fs::remove_dir_all(&root) {
+            warnings.push(format!("probe cleanup failed: {error}"));
+        }
     }
-
-    use std::sync::Arc;
+    {
+        let conn = state.db.lock();
+        if let Err(error) = crate::db::purge_path_data(&conn, pack_dir) {
+            warnings.push(format!("probe pack deregistration failed: {error}"));
+        }
+        let _ = crate::db::finalize_running_tool_activities(&conn, "probe", "succeeded");
+    }
+    handle.stop().await;
+    warnings
 }
