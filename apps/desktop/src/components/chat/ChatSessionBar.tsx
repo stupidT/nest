@@ -88,6 +88,11 @@ export function ChatSessionBar({ sessions, onResetChatUi }: Props) {
       queryClient.removeQueries({ queryKey: queryKeys.chatMessages(sessionId) });
       invalidate();
       onResetChatUi();
+      const wasLastActiveSession =
+        activeSessions.length === 1 && activeSessions[0].id === sessionId;
+      if (wasLastActiveSession) {
+        void newChat();
+      }
     },
     onError: (e: Error) => setStatusMessage(e.message),
   });
