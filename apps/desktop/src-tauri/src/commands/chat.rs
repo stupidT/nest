@@ -135,6 +135,22 @@ pub fn chat_review_file_change(
 
 #[tauri::command]
 pub fn chat_delete_session(state: State<'_, SharedState>, session_id: String) -> AppResult<()> {
+    if state.chat_turn_running() {
+        let active_session = {
+            let conn = state.db.lock();
+            conn.query_row(
+                "SELECT session_id FROM chat_turns WHERE status = 'running' LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+        };
+        if active_session.as_deref() == Some(session_id.as_str()) {
+            return Err(crate::error::AppError::msg(
+                "chat_turn_busy: this chat is generating. Stop the current task before deleting it.",
+            ));
+        }
+    }
     let conn = state.db.lock();
     db::delete_session(&conn, &session_id)
 }

@@ -51,6 +51,7 @@ impl AppState {
         vault::ensure_dir(&app_data_dir)?;
         let db_path = app_data_dir.join("nest.db");
         let db = crate::db::open_db(&db_path)?;
+        crate::db::recover_interrupted_turns(&db)?;
 
         let settings = {
             let conn = &db;
@@ -105,6 +106,20 @@ impl AppState {
                 std::sync::atomic::Ordering::SeqCst,
             )
             .is_ok()
+    }
+
+    pub fn chat_turn_running(&self) -> bool {
+        self.chat_turn_slot
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn ensure_no_chat_turn(&self) -> crate::error::AppResult<()> {
+        if self.chat_turn_running() {
+            return Err(crate::error::AppError::msg(
+                "chat_turn_busy: a chat turn is running. Stop it before changing Claude settings, deleting chats, or switching the vault.",
+            ));
+        }
+        Ok(())
     }
 
     pub fn end_chat_turn(&self) {

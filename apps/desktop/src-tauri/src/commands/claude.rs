@@ -118,6 +118,7 @@ pub async fn claude_save_settings(
     state: State<'_, SharedState>,
     request: ClaudeSettingsRequest,
 ) -> AppResult<ClaudeConnectionReport> {
+    state.ensure_no_chat_turn()?;
     {
         let conn = state.db.lock();
         db::save_claude_settings(

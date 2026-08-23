@@ -2283,6 +2283,26 @@ pub fn finalize_running_tool_activities(
     Ok(())
 }
 
+pub fn recover_interrupted_turns(conn: &Connection) -> AppResult<usize> {
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE chat_turns
+         SET status = 'interrupted',
+             error_code = COALESCE(error_code, 'app_shutdown'),
+             finished_at = COALESCE(finished_at, ?1)
+         WHERE status = 'running'",
+        params![now],
+    )?;
+    let count = conn.execute(
+        "UPDATE chat_tool_activities
+         SET status = 'interrupted', finished_at = ?1
+         WHERE status = 'running'
+           AND turn_id IN (SELECT id FROM chat_turns WHERE status = 'interrupted')",
+        params![now],
+    )?;
+    Ok(count)
+}
+
 pub fn list_tool_activities(conn: &Connection, turn_id: &str) -> AppResult<Vec<ToolActivityRow>> {
     let mut stmt = conn.prepare(
         "SELECT id, turn_id, sequence, source, kind, status, label, target, started_at, finished_at
