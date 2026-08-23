@@ -26,6 +26,7 @@ pub struct ActiveTurn {
     pub session_id: String,
     pub mode: CapabilityMode,
     pub workspace: RwLock<KnowledgeWorkspace>,
+    pub citations: RwLock<Vec<crate::db::Citation>>,
 }
 
 pub type ToolEventSink = Box<dyn Fn(&str, Option<&str>, bool) + Send + Sync>;
@@ -111,6 +112,7 @@ impl McpServerState {
                 mode,
                 protected_paths,
             )),
+            citations: RwLock::new(Vec::new()),
         });
         credential
     }
@@ -128,6 +130,32 @@ impl McpServerState {
         match turn.as_ref() {
             Some(active) => active.workspace.read().finish(),
             None => Ok(Vec::new()),
+        }
+    }
+
+    pub fn take_citations(&self) -> Vec<crate::db::Citation> {
+        let turn = self.active_turn.read();
+        match turn.as_ref() {
+            Some(active) => {
+                let mut citations = active.citations.write();
+                std::mem::take(&mut *citations)
+            }
+            None => Vec::new(),
+        }
+    }
+
+    fn record_citations(&self, new_citations: Vec<crate::db::Citation>) {
+        let turn = self.active_turn.read();
+        if let Some(active) = turn.as_ref() {
+            let mut citations = active.citations.write();
+            for citation in new_citations {
+                if !citations
+                    .iter()
+                    .any(|existing| existing.file_path == citation.file_path)
+                {
+                    citations.push(citation);
+                }
+            }
         }
     }
 
@@ -465,6 +493,17 @@ async fn call_tool_inner(
             limit,
         )
         .await?;
+        let citations = hits
+            .iter()
+            .map(|hit| crate::db::Citation {
+                chunk_id: String::new(),
+                file_path: hit.file_path.clone(),
+                title: hit.title.clone(),
+                snippet: hit.snippet.clone(),
+                score: hit.score,
+            })
+            .collect::<Vec<_>>();
+        server.record_citations(citations);
         return Ok(serde_json::to_string_pretty(&json!({
             "hits": hits.iter().map(|hit| json!({
                 "path": hit.file_path,
@@ -497,6 +536,18 @@ async fn call_tool_inner(
                 .and_then(Value::as_str)
                 .ok_or_else(|| KnowledgeError::new("invalid_input", "path is required"))?;
             let result = workspace.read(path)?;
+            server.record_citations(vec![crate::db::Citation {
+                chunk_id: String::new(),
+                file_path: result.path.clone(),
+                title: path
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(path)
+                    .trim_end_matches(".md")
+                    .to_string(),
+                snippet: String::new(),
+                score: 1.0,
+            }]);
             Ok(format!(
                 "{}{}",
                 result.content,

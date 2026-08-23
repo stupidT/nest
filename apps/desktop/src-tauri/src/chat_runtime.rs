@@ -286,6 +286,15 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
     };
 
     let file_changes = mcp_server.finish_staged().unwrap_or_default();
+    let citations = mcp_server.take_citations();
+    if !citations.is_empty() {
+        let _ = app.emit(
+            &stream_event,
+            ChatStreamEvent::Citations {
+                citations: citations.clone(),
+            },
+        );
+    }
     mcp_server.end_turn();
     mcp_server.clear_event_sink();
     let _ = std::fs::remove_file(&mcp_config_path);
@@ -297,7 +306,7 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
 
     Ok(ChatRunResult {
         answer: result.answer,
-        citations: Vec::new(),
+        citations,
         thinking: (!result.thinking.trim().is_empty()).then_some(result.thinking),
         thinking_seconds: None,
         file_changes,
