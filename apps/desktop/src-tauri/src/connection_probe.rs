@@ -270,20 +270,21 @@ async fn run_claude_driven_probe(
             .unwrap_or_default()
     };
     let required = [
-        "mcp__nest__knowledge_create",
-        "mcp__nest__knowledge_list",
-        "mcp__nest__knowledge_read",
-        "mcp__nest__knowledge_replace",
-        "mcp__nest__knowledge_search",
-        "mcp__nest__knowledge_delete",
+        "knowledge_create",
+        "knowledge_list",
+        "knowledge_read",
+        "knowledge_replace",
+        "knowledge_search",
+        "knowledge_delete",
     ];
     let mut tools_exercised = Vec::new();
     for tool in required {
+        let prefixed = format!("mcp__nest__{tool}");
         let seen = called
             .iter()
-            .any(|(label, status)| label == tool && status == "succeeded");
+            .any(|(label, status)| (label == tool || label == &prefixed) && status == "succeeded");
         if seen {
-            tools_exercised.push(tool.to_string());
+            tools_exercised.push(prefixed);
         } else {
             failures.push(format!("nest tool not exercised by Claude: {tool}"));
         }
@@ -295,15 +296,19 @@ async fn run_claude_driven_probe(
     }
 
     let disk_after = std::fs::read_to_string(&probe_file).ok();
-    if tools_exercised.contains(&"mcp__nest__knowledge_create".to_string())
-        && tools_exercised.contains(&"mcp__nest__knowledge_read".to_string())
-    {
-        let marker_seen = disk_after
+    if tools_exercised.len() == 6 {
+        let marker_seen = staged.iter().any(|change| {
+            change
+                .new_content
+                .as_deref()
+                .map(|c| c.contains(&env.challenge))
+                .unwrap_or(false)
+        }) || disk_after
             .as_deref()
             .map(|content| content.contains(&env.challenge))
             .unwrap_or(false);
-        if !marker_seen && !staged.is_empty() {
-            failures.push("probe marker not verified through knowledge_read".to_string());
+        if !marker_seen {
+            failures.push("probe marker not found in staged or disk content".to_string());
         }
     }
 
@@ -311,6 +316,7 @@ async fn run_claude_driven_probe(
         .iter()
         .filter(|(label, _)| {
             !label.starts_with("mcp__nest__")
+                && !label.starts_with("knowledge_")
                 && matches!(
                     label.to_ascii_lowercase().as_str(),
                     "read" | "edit" | "write" | "bash"
