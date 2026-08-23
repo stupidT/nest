@@ -459,6 +459,19 @@ export type ClaudeModelOption = {
   source: "default" | "observed" | "custom";
 };
 
+export type ToolActivityRow = {
+  id: string;
+  turn_id: string;
+  sequence: number;
+  source: string;
+  kind: string;
+  status: string;
+  label: string;
+  target: string | null;
+  started_at: string;
+  finished_at: string | null;
+};
+
 export type Citation = {
   chunk_id: string;
   file_path: string;
@@ -476,6 +489,7 @@ export type ChatMessage = {
   thinking_seconds?: number;
   file_changes?: ChatFileChangeSummary[];
   created_at: string;
+  turn_id?: string | null;
 };
 
 export type ChatMode = "ask" | "agent";

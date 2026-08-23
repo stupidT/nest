@@ -9,6 +9,7 @@ import type {
   ClaudeConnectionReport,
   ClaudeDetectionDto,
   ClaudeModelOption,
+  ToolActivityRow,
   ClaudeSettingsRequest,
   DiffPair,
   FileStatus,
@@ -137,6 +138,8 @@ export const api = {
     invoke<void>("chat_delete_session", { sessionId }),
   chatListMessages: (sessionId: string) =>
     invoke<ChatMessage[]>("chat_list_messages", { sessionId }),
+  chatListTurnActivities: (turnId: string) =>
+    invoke<ToolActivityRow[]>("chat_list_turn_activities", { turnId }),
   chatSend: (
     sessionId: string,
     expectedRevision: number,

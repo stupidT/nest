@@ -4,7 +4,7 @@ import {
   MessageScroller,
   useMessageScroller,
 } from "@shadcn/react/message-scroller";
-import { AlertCircle, Check, ChevronDown, FilePenLine, Info, Lightbulb, Loader2, LoaderCircle, X } from "lucide-react";
+import { AlertCircle, Check, ChevronDown, FilePenLine, Info, Lightbulb, Loader2, LoaderCircle, X, XCircle } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   AgentStatusIndicator,
@@ -658,6 +658,9 @@ export function ChatPanel() {
                 <UserBubble content={msg.content} mentions={mentionByName} />
               ) : (
                 <AssistantBubble>
+                  {msg.turn_id && (
+                    <TurnActivities turnId={msg.turn_id} />
+                  )}
                   {msg.thinking && (
                     <div className="mb-3">
                       <ThinkingDisclosure
@@ -849,6 +852,46 @@ export function ChatPanel() {
         />
       </div>
     </div>
+  );
+}
+
+function TurnActivities({ turnId }: { turnId: string }) {
+  const activitiesQuery = useQuery({
+    queryKey: ["turn-activities", turnId],
+    queryFn: () => api.chatListTurnActivities(turnId),
+  });
+  const activities = activitiesQuery.data ?? [];
+  if (activities.length === 0) return null;
+  return (
+    <details className="mb-3 rounded-md bg-muted/45 px-2 py-1.5 text-xs">
+      <summary className="cursor-pointer select-none text-muted-foreground">
+        {activities.length} tool {activities.length === 1 ? "call" : "calls"}
+      </summary>
+      <div className="mt-1.5 space-y-1">
+        {activities.map((activity) => (
+          <div
+            key={activity.id}
+            className="flex min-w-0 items-center gap-2"
+          >
+            {activity.status === "running" ? (
+              <Loader2 className="size-3.5 shrink-0 animate-spin text-primary" />
+            ) : activity.status === "succeeded" ? (
+              <Check className="size-3.5 shrink-0 text-success" />
+            ) : (
+              <XCircle className="size-3.5 shrink-0 text-destructive" />
+            )}
+            <span className="shrink-0 font-mono">
+              {activity.label.replace(/^mcp__nest__/, "")}
+            </span>
+            {activity.target && (
+              <span className="min-w-0 flex-1 truncate font-mono text-muted-foreground">
+                {activity.target}
+              </span>
+            )}
+          </div>
+        ))}
+      </div>
+    </details>
   );
 }
 
