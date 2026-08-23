@@ -28,10 +28,13 @@ pub struct ActiveTurn {
     pub workspace: RwLock<KnowledgeWorkspace>,
 }
 
+pub type ToolEventSink = Box<dyn Fn(&str, Option<&str>, bool) + Send + Sync>;
+
 pub struct McpServerState {
     pub state: SharedState,
     credential: RwLock<Option<String>>,
     active_turn: RwLock<Option<ActiveTurn>>,
+    event_sink: RwLock<Option<ToolEventSink>>,
     shutdown: Arc<AtomicBool>,
 }
 
@@ -73,8 +76,23 @@ impl McpServerState {
             state,
             credential: RwLock::new(None),
             active_turn: RwLock::new(None),
+            event_sink: RwLock::new(None),
             shutdown: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    pub fn set_event_sink(&self, sink: ToolEventSink) {
+        *self.event_sink.write() = Some(sink);
+    }
+
+    pub fn clear_event_sink(&self) {
+        *self.event_sink.write() = None;
+    }
+
+    fn emit_tool_event(&self, label: &str, target: Option<&str>, done: bool) {
+        if let Some(sink) = self.event_sink.read().as_ref() {
+            sink(label, target, done);
+        }
     }
 
     pub fn begin_turn(
@@ -387,6 +405,22 @@ fn tool_definition(name: &str, description: &str, schema: Value) -> Value {
 
 #[allow(clippy::mut_range_bound)]
 async fn call_tool(
+    server: &Arc<McpServerState>,
+    name: &str,
+    args: &Value,
+) -> Result<String, KnowledgeError> {
+    let target = args
+        .get("path")
+        .or_else(|| args.get("query"))
+        .and_then(Value::as_str)
+        .map(|value| value.chars().take(48).collect::<String>());
+    server.emit_tool_event(name, target.as_deref(), false);
+    let result = call_tool_inner(server, name, args).await;
+    server.emit_tool_event(name, target.as_deref(), true);
+    result
+}
+
+async fn call_tool_inner(
     server: &Arc<McpServerState>,
     name: &str,
     args: &Value,

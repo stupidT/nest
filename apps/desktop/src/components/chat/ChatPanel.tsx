@@ -481,7 +481,7 @@ export function ChatPanel() {
               const operation = tool;
               return [
                 ...current.filter((item) => item.path !== path),
-                { path, operation, staged: false },
+                { path, operation, staged: event.done ?? false },
               ];
             });
           } else if (event.type === "file_editing") {
@@ -934,14 +934,30 @@ function TurnDetails({
 function LiveFileActivities({ activities }: { activities: Array<{ path: string; operation: string; staged: boolean }> }) {
   return (
     <div className="mb-3 space-y-1 rounded-md bg-muted/45 p-2 text-xs">
-      {activities.map((activity) => (
-        <div key={activity.path} className="flex min-w-0 items-center gap-2">
-          {activity.staged ? <Check className="size-3.5 shrink-0 text-success" /> : <Loader2 className="size-3.5 shrink-0 animate-spin text-primary" />}
-          <FilePenLine className="size-3.5 shrink-0 text-muted-foreground" />
-          <span className="min-w-0 flex-1 truncate font-mono">{activity.path}</span>
-          <span className="shrink-0 capitalize text-muted-foreground">{activity.staged ? "staged" : activity.operation}</span>
-        </div>
-      ))}
+      {activities.map((activity) => {
+        const isToolCall = activity.operation.startsWith("knowledge_");
+        return (
+          <div key={activity.path} className="flex min-w-0 items-center gap-2">
+            {activity.staged ? <Check className="size-3.5 shrink-0 text-success" /> : <Loader2 className="size-3.5 shrink-0 animate-spin text-primary" />}
+            {isToolCall ? (
+              <>
+                <span className="shrink-0 font-mono">{activity.operation}</span>
+                <span className="min-w-0 flex-1 truncate font-mono text-muted-foreground">{activity.path}</span>
+              </>
+            ) : (
+              <>
+                <FilePenLine className="size-3.5 shrink-0 text-muted-foreground" />
+                <span className="min-w-0 flex-1 truncate font-mono">{activity.path}</span>
+              </>
+            )}
+            <span className="shrink-0 capitalize text-muted-foreground">
+              {isToolCall
+                ? (activity.staged ? "done" : "running")
+                : (activity.staged ? "staged" : activity.operation)}
+            </span>
+          </div>
+        );
+      })}
     </div>
   );
 }

@@ -160,6 +160,7 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
                 ChatStreamEvent::ToolActivity {
                     label: name.to_string(),
                     target: target.map(str::to_string),
+                    done: false,
                 },
             );
             let sequence = tool_sequence.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -191,6 +192,21 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
         let credential = runtime
             .server
             .begin_turn(&session_id, chat_mode, Vec::new());
+        let sink_app = app.clone();
+        let sink_event = stream_event.clone();
+        runtime
+            .server
+            .set_event_sink(Box::new(move |label, target, done| {
+                use tauri::Emitter;
+                let _ = sink_app.emit(
+                    &sink_event,
+                    ChatStreamEvent::ToolActivity {
+                        label: label.to_string(),
+                        target: target.map(str::to_string),
+                        done,
+                    },
+                );
+            }));
         let config_path =
             std::env::temp_dir().join(format!("nest-mcp-{}.json", uuid::Uuid::new_v4().simple()));
         std::fs::write(&config_path, runtime.handle.config_json(&credential))?;
@@ -215,6 +231,7 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
             let _ = std::fs::remove_file(&mcp_config_path);
             mcp_server.abort_staged();
             mcp_server.end_turn();
+            mcp_server.clear_event_sink();
             {
                 let conn = state.db.lock();
                 let _ = db::finalize_running_tool_activities(&conn, &request.turn_id, "failed");
@@ -245,6 +262,7 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
 
     let file_changes = mcp_server.finish_staged().unwrap_or_default();
     mcp_server.end_turn();
+    mcp_server.clear_event_sink();
     let _ = std::fs::remove_file(&mcp_config_path);
     {
         let conn = state.db.lock();

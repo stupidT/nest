@@ -334,6 +334,8 @@ pub struct ChatMessage {
     #[serde(default)]
     pub file_changes: Vec<ChatFileChangeSummary>,
     pub created_at: String,
+    #[serde(default)]
+    pub turn_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1507,6 +1509,7 @@ pub fn begin_chat_turn(
             thinking_seconds: None,
             file_changes: Vec::new(),
             created_at: now,
+            turn_id: Some(turn_id.clone()),
         },
         turn_id,
         backend,
@@ -1601,6 +1604,7 @@ pub fn commit_assistant_and_finish_turn(
         thinking_seconds: message.thinking_seconds,
         file_changes: summaries,
         created_at: now,
+        turn_id: None,
     })
 }
 
@@ -2031,13 +2035,16 @@ pub fn add_message(
         thinking_seconds: message.thinking_seconds,
         file_changes: summaries,
         created_at: now,
+        turn_id: None,
     })
 }
 
 pub fn list_messages(conn: &Connection, session_id: &str) -> AppResult<Vec<ChatMessage>> {
     let mut stmt = conn.prepare(
-        "SELECT id, role, content, citations_json, thinking, thinking_seconds, created_at FROM chat_messages
-         WHERE session_id = ?1 ORDER BY created_at ASC",
+        "SELECT m.id, m.role, m.content, m.citations_json, m.thinking, m.thinking_seconds, m.created_at,
+                (SELECT t.id FROM chat_turns t WHERE t.user_message_id = m.id OR t.assistant_message_id = m.id LIMIT 1)
+         FROM chat_messages m
+         WHERE m.session_id = ?1 ORDER BY m.created_at ASC",
     )?;
     let rows = stmt.query_map(params![session_id], |row| {
         let citations_json: String = row.get(3)?;
@@ -2055,6 +2062,7 @@ pub fn list_messages(conn: &Connection, session_id: &str) -> AppResult<Vec<ChatM
             thinking_seconds: row.get(5)?,
             file_changes: Vec::new(),
             created_at: row.get(6)?,
+            turn_id: row.get(7)?,
         })
     })?;
     let mut messages = rows.collect::<Result<Vec<_>, _>>()?;
