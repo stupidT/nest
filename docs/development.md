@@ -35,6 +35,28 @@ The Hub service listens on `PORT` (from `.env`, typically `8787`). Configure the
 - The loopback MCP server (`claude_mcp.rs`) binds `127.0.0.1:0` inside the app process; no extra ports need to be opened. Tool calls are authenticated with a per-turn bearer credential.
 - Debugging the webview console: start the app with `$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=9222"` and run `node scripts/cdp-watch.cjs` to stream console output and exceptions.
 
+### Refreshing the bundled tutorial packs
+
+The `getting-started` and `getting-started-zh-cn` packs are compiled into the desktop
+binary (`include_dir!` in `default_pack.rs`) and seeded into the vault once per app-data
+directory. Normally they are never re-seeded — markers under the app data dir and the
+`sync_state` rows both guard against overwriting. To pick up edited pack content while
+iterating on the guides:
+
+1. Rebuild so the binary embeds the new files (`npm run tauri dev` recompiles automatically).
+2. Restart the app with the reseed flag:
+
+```powershell
+$env:NEST_DEV_RESEED = "1"
+npm run tauri dev
+```
+
+On startup the app deletes both packs' `sync_state` rows and vault folders, then seeds the
+embedded copies fresh. Settings, sessions, and other packs are untouched; existing pack
+snapshots are reused. The flag only matters at startup — unset it (or start normally)
+afterwards. Pack content edits also need a rebuild even without the flag, because the
+files are baked into the binary at compile time.
+
 ## Environment
 
 | App | File | Variables |
