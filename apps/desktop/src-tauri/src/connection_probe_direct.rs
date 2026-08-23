@@ -1,4 +1,4 @@
-use crate::claude_mcp::{start_server, McpServerState, ToolEventSink};
+use crate::claude_mcp::{start_server, McpServerState};
 use crate::knowledge_workspace::CapabilityMode;
 use crate::state::SharedState;
 use serde_json::{json, Value};

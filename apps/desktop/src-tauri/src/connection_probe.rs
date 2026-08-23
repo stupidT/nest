@@ -14,6 +14,7 @@ pub struct ProbeOutcome {
 
 pub type SinkBuilder = Box<dyn FnOnce() -> ToolEventSink + Send>;
 
+#[allow(dead_code)]
 const PROBE_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub async fn run_six_tool_probe(
@@ -148,7 +149,7 @@ async fn run_claude_driven_probe(
          Use only the Nest MCP tools (mcp__nest__*), not your native file tools. Reply with a one-line confirmation of each step.",
         path = env.probe_path,
         marker = env.challenge,
-        marker2 = format!("{}-v2", env.challenge),
+        marker2 = format_args!("{}-v2", env.challenge),
         pack = env.pack_dir,
     );
 
@@ -185,7 +186,7 @@ async fn run_claude_driven_probe(
          2. knowledge_read {path} to confirm the current marker\n\
          3. knowledge_delete {path}\n\
          Reply with a one-line confirmation of each step.",
-        marker = format!("{}-v2", env.challenge),
+        marker = format_args!("{}-v2", env.challenge),
         path = env.probe_path,
     );
 
