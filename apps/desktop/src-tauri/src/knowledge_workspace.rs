@@ -25,6 +25,7 @@ pub const ERR_ALREADY_EXISTS: &str = "already_exists";
 pub const ERR_PERMISSION_DENIED: &str = "permission_denied";
 pub const ERR_PROTECTED_PATH: &str = "protected_path";
 pub const ERR_REVIEW_LOCKED: &str = "review_locked";
+#[allow(dead_code)]
 pub const ERR_CONFLICT: &str = "conflict";
 pub const ERR_LIMIT_EXCEEDED: &str = "limit_exceeded";
 
@@ -406,17 +407,16 @@ impl KnowledgeWorkspace {
                     .new_content
                     .ok_or_else(|| AppError::msg(format!("{path} is pending deletion")));
             }
-            match crate::knowledge_review::reconcile_pending_change(&self.state, &pending) {
-                Ok(crate::knowledge_review::ReconcileOutcome::Rebased) => {
-                    let conn = self.state.db.lock();
-                    let rebased = db::get_pending_chat_file_change_for_path(&conn, path)?;
-                    if let Some(rebased) = rebased {
-                        return rebased
-                            .new_content
-                            .ok_or_else(|| AppError::msg(format!("{path} is pending deletion")));
-                    }
+            if let Ok(crate::knowledge_review::ReconcileOutcome::Rebased) =
+                crate::knowledge_review::reconcile_pending_change(&self.state, &pending)
+            {
+                let conn = self.state.db.lock();
+                let rebased = db::get_pending_chat_file_change_for_path(&conn, path)?;
+                if let Some(rebased) = rebased {
+                    return rebased
+                        .new_content
+                        .ok_or_else(|| AppError::msg(format!("{path} is pending deletion")));
                 }
-                _ => {}
             }
         }
         vault::read_file(&self.state.vault_path(), path)

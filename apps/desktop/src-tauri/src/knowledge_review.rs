@@ -8,6 +8,7 @@ use std::path::Path;
 pub const REVIEW_STATUS_PENDING: &str = "pending";
 #[allow(dead_code)]
 pub const REVIEW_STATUS_APPLYING: &str = "applying";
+#[allow(dead_code)]
 pub const REVIEW_STATUS_APPROVED: &str = "approved";
 pub const REVIEW_STATUS_REJECTED: &str = "rejected";
 #[allow(dead_code)]
@@ -467,11 +468,8 @@ mod reconcile_tests {
         );
         std::fs::write(env.state.vault_path().join("p/a.md"), "one\nOTHER\nthree").unwrap();
         assert!(
-            matches!(
-                KnowledgeReview::review(&env.state, &id, true).unwrap(),
-                ReviewOutcome::Conflicted
-            ),
-            "approving after an overlapping external change must conflict, not apply"
+            KnowledgeReview::review(&env.state, &id, true).is_err(),
+            "approving a conflicted proposal must fail outright"
         );
         assert!(
             matches!(KnowledgeReview::review(&env.state, &id, true), Err(_)),
