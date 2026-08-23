@@ -895,7 +895,7 @@ function TurnDetails({
       {open && (
         <div className="mt-2 space-y-2">
           {activities.length > 0 && (
-            <div className="space-y-1 rounded-md bg-muted/45 px-2 py-1.5">
+            <div className="space-y-1 rounded-md bg-muted/45 px-2 py-1.5 text-xs leading-relaxed">
               {activities.map((activity) => (
                 <div
                   key={activity.id}
