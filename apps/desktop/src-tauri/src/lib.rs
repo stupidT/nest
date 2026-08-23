@@ -6,6 +6,7 @@ mod chat_runtime;
 mod claude_cli;
 mod claude_mcp;
 mod commands;
+mod connection_probe;
 mod db;
 mod debug;
 mod default_pack;

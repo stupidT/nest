@@ -108,7 +108,7 @@ pub async fn claude_test_connection(
     state: State<'_, SharedState>,
     cli_path: String,
 ) -> AppResult<ClaudeConnectionReport> {
-    let report = test_connection(&cli_path).await;
+    let report = test_connection(&cli_path, &state).await;
     *state.claude_connection.lock() = Some(report.clone());
     Ok(report)
 }
@@ -135,10 +135,10 @@ pub async fn claude_save_settings(
             ..Default::default()
         });
     }
-    let mut report = test_connection(&request.cli_path).await;
+    let mut report = test_connection(&request.cli_path, &state).await;
     if report.status != ClaudeConnectionStatus::Connected {
         tokio::time::sleep(std::time::Duration::from_millis(750)).await;
-        report = test_connection(&request.cli_path).await;
+        report = test_connection(&request.cli_path, &state).await;
     }
     if report.status == ClaudeConnectionStatus::Connected {
         let conn = state.db.lock();
@@ -199,7 +199,7 @@ pub fn claude_connection_proven(state: &SharedState, settings: &db::AppSettings)
     )
 }
 
-async fn test_connection(cli_path: &str) -> ClaudeConnectionReport {
+async fn test_connection(cli_path: &str, state: &SharedState) -> ClaudeConnectionReport {
     let trimmed = cli_path.trim();
     let configured = if trimmed.is_empty() {
         None
@@ -214,7 +214,7 @@ async fn test_connection(cli_path: &str) -> ClaudeConnectionReport {
     for detection in &detections {
         match claude_cli::probe_version(detection, claude_cli::PROBE_VERSION_TIMEOUT).await {
             ProbeOutcome::Version(_) => {
-                if let Some(report) = minimal_round_trip(detection, trimmed).await {
+                if let Some(report) = minimal_round_trip(detection, trimmed, state).await {
                     return report;
                 }
             }
@@ -227,6 +227,7 @@ async fn test_connection(cli_path: &str) -> ClaudeConnectionReport {
 async fn minimal_round_trip(
     detection: &ClaudeDetection,
     configured_path: &str,
+    state: &SharedState,
 ) -> Option<ClaudeConnectionReport> {
     let temp_dir = std::env::temp_dir();
     let probe_session = uuid::Uuid::new_v4().to_string();
@@ -234,15 +235,33 @@ async fn minimal_round_trip(
         claude_cli::probe_connection(detection, &probe_session, &temp_dir, MIN_CONNECTION_TIMEOUT)
             .await;
     match outcome {
-        Ok(result) => Some(ClaudeConnectionReport {
-            status: ClaudeConnectionStatus::Connected,
-            configured_cli_path: configured_path.to_string(),
-            resolved_cli_path: result.resolved_path,
-            cli_version: result.cli_version,
-            effective_model: result.effective_model,
-            tested_at: Utc::now().to_rfc3339(),
-            message: None,
-        }),
+        Ok(result) => {
+            let probe = crate::connection_probe::run_six_tool_probe(state.clone(), None).await;
+            if !probe.failures.is_empty() {
+                return Some(unavailable_report(
+                    configured_path,
+                    &format!("nest tool probe failed: {}", probe.failures.join("; ")),
+                ));
+            }
+            if !probe.cleanup_warnings.is_empty() {
+                return Some(unavailable_report(
+                    configured_path,
+                    &format!(
+                        "nest tool probe left residue: {}",
+                        probe.cleanup_warnings.join("; ")
+                    ),
+                ));
+            }
+            Some(ClaudeConnectionReport {
+                status: ClaudeConnectionStatus::Connected,
+                configured_cli_path: configured_path.to_string(),
+                resolved_cli_path: result.resolved_path,
+                cli_version: result.cli_version,
+                effective_model: result.effective_model,
+                tested_at: Utc::now().to_rfc3339(),
+                message: None,
+            })
+        }
         Err(message) => Some(unavailable_report(configured_path, &message)),
     }
 }
