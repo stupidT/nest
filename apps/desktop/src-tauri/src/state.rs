@@ -88,6 +88,7 @@ impl AppState {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn stop_mcp_server(&self) {
         let runtime = self.mcp.lock().take();
         if let Some(runtime) = runtime {
