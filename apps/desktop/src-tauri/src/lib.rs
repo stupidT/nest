@@ -86,6 +86,7 @@ pub fn run() {
             commands::chat_update_selection,
             commands::chat_delete_session,
             commands::chat_list_messages,
+            commands::chat_list_turn_activities,
             commands::chat_get_file_change,
             commands::chat_get_pending_file_change,
             commands::chat_review_file_change,

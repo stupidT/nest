@@ -530,6 +530,20 @@ fn migrate(conn: &Connection) -> AppResult<()> {
             finished_at TEXT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS chat_tool_activities (
+            id TEXT PRIMARY KEY,
+            turn_id TEXT NOT NULL REFERENCES chat_turns(id) ON DELETE CASCADE,
+            sequence INTEGER NOT NULL,
+            source TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            status TEXT NOT NULL,
+            label TEXT NOT NULL,
+            target TEXT NULL,
+            started_at TEXT NOT NULL,
+            finished_at TEXT NULL,
+            UNIQUE(turn_id, sequence)
+        );
+
         CREATE TABLE IF NOT EXISTS index_meta (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             indexed_files INTEGER NOT NULL DEFAULT 0,
@@ -2188,6 +2202,101 @@ pub fn clear_chat_file_change_claim(conn: &Connection, change_id: &str) -> AppRe
         params![change_id],
     )?;
     Ok(())
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolActivityRow {
+    pub id: String,
+    pub turn_id: String,
+    pub sequence: i64,
+    pub source: String,
+    pub kind: String,
+    pub status: String,
+    pub label: String,
+    pub target: Option<String>,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+}
+
+pub fn insert_tool_activity(
+    conn: &Connection,
+    turn_id: &str,
+    sequence: i64,
+    source: &str,
+    kind: &str,
+    label: &str,
+    target: Option<&str>,
+) -> AppResult<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO chat_tool_activities
+            (id, turn_id, sequence, source, kind, status, label, target, started_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7, ?8)",
+        params![
+            uuid::Uuid::new_v4().to_string(),
+            turn_id,
+            sequence,
+            source,
+            kind,
+            label,
+            target,
+            Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub fn finish_tool_activity(
+    conn: &Connection,
+    turn_id: &str,
+    sequence: i64,
+    status: &str,
+) -> AppResult<()> {
+    conn.execute(
+        "UPDATE chat_tool_activities
+         SET status = ?1, finished_at = ?2
+         WHERE turn_id = ?3 AND sequence = ?4",
+        params![status, Utc::now().to_rfc3339(), turn_id, sequence],
+    )?;
+    Ok(())
+}
+
+pub fn finalize_running_tool_activities(
+    conn: &Connection,
+    turn_id: &str,
+    status: &str,
+) -> AppResult<()> {
+    conn.execute(
+        "UPDATE chat_tool_activities
+         SET status = ?1, finished_at = ?2
+         WHERE turn_id = ?3 AND status = 'running'",
+        params![status, Utc::now().to_rfc3339(), turn_id],
+    )?;
+    Ok(())
+}
+
+pub fn list_tool_activities(conn: &Connection, turn_id: &str) -> AppResult<Vec<ToolActivityRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, turn_id, sequence, source, kind, status, label, target, started_at, finished_at
+         FROM chat_tool_activities
+         WHERE turn_id = ?1
+         ORDER BY sequence ASC",
+    )?;
+    let rows = stmt.query_map(params![turn_id], |row| {
+        Ok(ToolActivityRow {
+            id: row.get(0)?,
+            turn_id: row.get(1)?,
+            sequence: row.get(2)?,
+            source: row.get(3)?,
+            kind: row.get(4)?,
+            status: row.get(5)?,
+            label: row.get(6)?,
+            target: row.get(7)?,
+            started_at: row.get(8)?,
+            finished_at: row.get(9)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
 /// Parameters for `upsert_sync_state` — grouped into a struct since the

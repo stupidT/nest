@@ -19,6 +19,7 @@ pub struct ChatRunRequest {
     pub requested_model: db::ModelSelection,
     pub protected_paths: Vec<String>,
     pub stream_event: String,
+    pub turn_id: String,
 }
 
 pub struct ChatRunResult {
@@ -133,6 +134,9 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
     let stream_thinking = stream_event.clone();
     let app_tool = app.clone();
     let stream_tool = stream_event.clone();
+    let state_for_tools = state.clone();
+    let turn_id_for_tools = request.turn_id.clone();
+    let tool_sequence = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0));
     let events = TurnEvents {
         token: Box::new(move |text| {
             let _ = app_token.emit(
@@ -157,6 +161,17 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
                     label: name.to_string(),
                     target: target.map(str::to_string),
                 },
+            );
+            let sequence = tool_sequence.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let conn = state_for_tools.db.lock();
+            let _ = db::insert_tool_activity(
+                &conn,
+                &turn_id_for_tools,
+                sequence,
+                "nest_mcp",
+                tool_kind_for(name),
+                name,
+                target,
             );
         }),
         initialized: Box::new(move |session_id, _model, _version| {
@@ -200,6 +215,10 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
             let _ = std::fs::remove_file(&mcp_config_path);
             mcp_server.abort_staged();
             mcp_server.end_turn();
+            {
+                let conn = state.db.lock();
+                let _ = db::finalize_running_tool_activities(&conn, &request.turn_id, "failed");
+            }
             let mapped = map_turn_error(&error);
             if is_unresumable_failure(&error) {
                 let updated = {
@@ -227,6 +246,11 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
     let file_changes = mcp_server.finish_staged().unwrap_or_default();
     mcp_server.end_turn();
     let _ = std::fs::remove_file(&mcp_config_path);
+    {
+        let conn = state.db.lock();
+        let _ = db::finalize_running_tool_activities(&conn, &request.turn_id, "succeeded");
+    }
+    crate::indexing::schedule(&state)?;
 
     Ok(ChatRunResult {
         answer: result.answer,
@@ -237,6 +261,18 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
         backend: ChatBackend::Claude,
         effective_model: result.model,
     })
+}
+
+fn tool_kind_for(name: &str) -> &'static str {
+    match name.trim_start_matches("mcp__nest__") {
+        "knowledge_search" => "knowledge_search",
+        "knowledge_list" => "knowledge_list",
+        "knowledge_read" => "knowledge_read",
+        "knowledge_create" => "knowledge_stage",
+        "knowledge_replace" => "knowledge_stage",
+        "knowledge_delete" => "knowledge_stage",
+        _ => "external_tool",
+    }
 }
 
 pub fn nest_system_instructions(mode: crate::knowledge_workspace::CapabilityMode) -> String {

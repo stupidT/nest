@@ -161,6 +161,15 @@ pub fn chat_list_messages(
     Ok(messages)
 }
 
+#[tauri::command]
+pub fn chat_list_turn_activities(
+    state: State<'_, SharedState>,
+    turn_id: String,
+) -> AppResult<Vec<db::ToolActivityRow>> {
+    let conn = state.db.lock();
+    db::list_tool_activities(&conn, &turn_id)
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatSendRequest {
@@ -270,6 +279,7 @@ pub async fn chat_send(
         requested_model: prepared.requested_model.clone(),
         protected_paths: protected_paths.unwrap_or_default(),
         stream_event: stream_event.clone(),
+        turn_id: turn_id.clone(),
     })
     .await
     {
