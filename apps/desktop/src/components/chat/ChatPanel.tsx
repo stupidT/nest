@@ -658,17 +658,11 @@ export function ChatPanel() {
                 <UserBubble content={msg.content} mentions={mentionByName} />
               ) : (
                 <AssistantBubble>
-                  {msg.turn_id && (
-                    <TurnActivities turnId={msg.turn_id} />
-                  )}
-                  {msg.thinking && (
-                    <div className="mb-3">
-                      <ThinkingDisclosure
-                        content={msg.thinking}
-                        seconds={msg.thinking_seconds}
-                      />
-                    </div>
-                  )}
+                  <TurnDetails
+                    turnId={msg.turn_id}
+                    thinking={msg.thinking}
+                    thinkingSeconds={msg.thinking_seconds}
+                  />
                   <MarkdownBody className={bubble}>{msg.content}</MarkdownBody>
                   {msg.file_changes && <ChatFileChanges changes={msg.file_changes} onReview={(path) => {
                     openFileTab(path, { preview: false });
@@ -855,43 +849,85 @@ export function ChatPanel() {
   );
 }
 
-function TurnActivities({ turnId }: { turnId: string }) {
+function TurnDetails({
+  turnId,
+  thinking,
+  thinkingSeconds,
+}: {
+  turnId?: string | null;
+  thinking?: string;
+  thinkingSeconds?: number;
+}) {
+  const [open, setOpen] = useState(false);
   const activitiesQuery = useQuery({
-    queryKey: ["turn-activities", turnId],
-    queryFn: () => api.chatListTurnActivities(turnId),
+    queryKey: ["turn-activities", turnId ?? ""],
+    queryFn: () => api.chatListTurnActivities(turnId!),
+    enabled: !!turnId,
   });
   const activities = activitiesQuery.data ?? [];
-  if (activities.length === 0) return null;
+  const hasThinking = !!thinking?.trim();
+  if (!hasThinking && activities.length === 0) return null;
+
+  const labelParts: string[] = [];
+  if (hasThinking) {
+    labelParts.push(
+      `Thought for ${(thinkingSeconds ?? 0).toFixed(1)} seconds`,
+    );
+  }
+  if (activities.length > 0) {
+    labelParts.push(
+      `${activities.length} tool ${activities.length === 1 ? "call" : "calls"}`,
+    );
+  }
+
   return (
-    <details className="mb-3 rounded-md bg-muted/45 px-2 py-1.5 text-xs">
-      <summary className="cursor-pointer select-none text-muted-foreground">
-        {activities.length} tool {activities.length === 1 ? "call" : "calls"}
-      </summary>
-      <div className="mt-1.5 space-y-1">
-        {activities.map((activity) => (
-          <div
-            key={activity.id}
-            className="flex min-w-0 items-center gap-2"
-          >
-            {activity.status === "running" ? (
-              <Loader2 className="size-3.5 shrink-0 animate-spin text-primary" />
-            ) : activity.status === "succeeded" ? (
-              <Check className="size-3.5 shrink-0 text-success" />
-            ) : (
-              <XCircle className="size-3.5 shrink-0 text-destructive" />
-            )}
-            <span className="shrink-0 font-mono">
-              {activity.label.replace(/^mcp__nest__/, "")}
-            </span>
-            {activity.target && (
-              <span className="min-w-0 flex-1 truncate font-mono text-muted-foreground">
-                {activity.target}
-              </span>
-            )}
-          </div>
-        ))}
-      </div>
-    </details>
+    <div className="mb-3 border-t border-border/60 pt-2">
+      <button
+        type="button"
+        className="flex w-full items-center gap-1.5 text-left text-xs text-muted-foreground hover:text-foreground"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+      >
+        <Lightbulb className="size-3.5" />
+        <span>{labelParts.join(" · ")}</span>
+        <ChevronDown className={cn("ml-auto size-3.5 transition-transform", open && "rotate-180")} />
+      </button>
+      {open && (
+        <div className="mt-2 space-y-2">
+          {activities.length > 0 && (
+            <div className="space-y-1 rounded-md bg-muted/45 px-2 py-1.5">
+              {activities.map((activity) => (
+                <div
+                  key={activity.id}
+                  className="flex min-w-0 items-center gap-2"
+                >
+                  {activity.status === "succeeded" ? (
+                    <Check className="size-3.5 shrink-0 text-success" />
+                  ) : activity.status === "running" ? (
+                    <Loader2 className="size-3.5 shrink-0 animate-spin text-primary" />
+                  ) : (
+                    <XCircle className="size-3.5 shrink-0 text-destructive" />
+                  )}
+                  <span className="shrink-0 font-mono">
+                    {activity.label.replace(/^mcp__nest__/, "")}
+                  </span>
+                  {activity.target && (
+                    <span className="min-w-0 flex-1 truncate font-mono text-muted-foreground">
+                      {activity.target}
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          {hasThinking && (
+            <pre className="max-h-40 overflow-y-auto whitespace-pre-wrap rounded-md bg-background/60 p-2 text-xs leading-relaxed text-muted-foreground">
+              {thinking}
+            </pre>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -982,7 +1018,7 @@ function ThinkingDisclosure({
         <ChevronDown className={cn("ml-auto size-3.5 transition-transform", open && "rotate-180")} />
       </button>
       {open && (
-        <pre className="mt-2 h-40 overflow-y-auto whitespace-pre-wrap rounded-md bg-background/60 p-2 text-xs leading-relaxed text-muted-foreground">
+        <pre className="mt-2 max-h-40 overflow-y-auto whitespace-pre-wrap rounded-md bg-background/60 p-2 text-xs leading-relaxed text-muted-foreground">
           {content}
         </pre>
       )}
