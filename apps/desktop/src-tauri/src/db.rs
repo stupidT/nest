@@ -363,6 +363,17 @@ pub struct ChatFileChangeDetail {
 }
 
 #[derive(Debug, Clone)]
+pub struct ClaimedChatFileChange {
+    pub id: String,
+    pub path: String,
+    pub status: String,
+    pub claim_id: String,
+    pub claim_kind: String,
+    pub expected_old_hash: Option<String>,
+    pub expected_new_hash: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct NewChatFileChange {
     pub path: String,
     pub operation: String,
@@ -626,6 +637,20 @@ fn ensure_chat_file_change_columns(conn: &Connection) -> AppResult<()> {
         )?;
         conn.execute(
             "ALTER TABLE chat_file_changes ADD COLUMN resolution_reason TEXT",
+            [],
+        )?;
+    }
+    if !table_has_column(conn, "chat_file_changes", "apply_expected_old_hash")? {
+        conn.execute(
+            "ALTER TABLE chat_file_changes ADD COLUMN apply_expected_old_hash TEXT",
+            [],
+        )?;
+        conn.execute(
+            "ALTER TABLE chat_file_changes ADD COLUMN apply_expected_new_hash TEXT",
+            [],
+        )?;
+        conn.execute(
+            "ALTER TABLE chat_file_changes ADD COLUMN apply_journal_json TEXT",
             [],
         )?;
     }
@@ -2213,10 +2238,39 @@ pub fn list_pending_chat_file_changes(conn: &Connection) -> AppResult<Vec<ChatFi
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
-pub fn approve_chat_file_change(conn: &Connection, change_id: &str) -> AppResult<()> {
+pub fn list_claimed_chat_file_changes(conn: &Connection) -> AppResult<Vec<ClaimedChatFileChange>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, path, status, claim_id, claim_kind,
+                apply_expected_old_hash, apply_expected_new_hash
+         FROM chat_file_changes
+         WHERE status IN ('applying', 'rebasing') AND claim_id IS NOT NULL
+         ORDER BY rowid",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(ClaimedChatFileChange {
+            id: row.get(0)?,
+            path: row.get(1)?,
+            status: row.get(2)?,
+            claim_id: row.get(3)?,
+            claim_kind: row.get(4)?,
+            expected_old_hash: row.get(5)?,
+            expected_new_hash: row.get(6)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+pub fn approve_chat_file_change(
+    conn: &Connection,
+    change_id: &str,
+    claim_id: &str,
+) -> AppResult<()> {
     let changed = conn.execute(
-        "UPDATE chat_file_changes SET status = 'approved' WHERE id = ?1 AND status = 'applying'",
-        params![change_id],
+        "UPDATE chat_file_changes
+         SET status = 'approved', claim_id = NULL, claim_kind = NULL, claimed_at = NULL,
+             apply_journal_json = NULL
+         WHERE id = ?1 AND status = 'applying' AND claim_id = ?2 AND claim_kind = 'apply'",
+        params![change_id, claim_id],
     )?;
     if changed == 0 {
         return Err(crate::error::AppError::msg(
@@ -2247,12 +2301,38 @@ pub fn set_chat_file_change_status(
     Ok(())
 }
 
-pub fn claim_chat_file_change(conn: &Connection, change_id: &str, claim_id: &str) -> AppResult<()> {
+pub fn claim_chat_file_change(
+    conn: &Connection,
+    change_id: &str,
+    claim_id: &str,
+    claim_kind: &str,
+    expected_old_hash: Option<&str>,
+    expected_new_hash: Option<&str>,
+) -> AppResult<()> {
+    if claim_kind != "apply" && claim_kind != "rebase" {
+        return Err(crate::error::AppError::msg("Invalid proposal claim kind"));
+    }
+    let status = if claim_kind == "apply" {
+        "applying"
+    } else {
+        "rebasing"
+    };
     let changed = conn.execute(
         "UPDATE chat_file_changes
-         SET status = 'applying', claim_id = ?1, claim_kind = 'apply', claimed_at = ?2
-         WHERE id = ?3 AND status = 'pending'",
-        params![claim_id, Utc::now().to_rfc3339(), change_id],
+         SET status = ?1, claim_id = ?2, claim_kind = ?3, claimed_at = ?4,
+             apply_expected_old_hash = ?5, apply_expected_new_hash = ?6,
+             apply_journal_json = ?7
+         WHERE id = ?8 AND status = 'pending' AND claim_id IS NULL",
+        params![
+            status,
+            claim_id,
+            claim_kind,
+            Utc::now().to_rfc3339(),
+            expected_old_hash,
+            expected_new_hash,
+            serde_json::json!({ "phase": "claimed" }).to_string(),
+            change_id
+        ],
     )?;
     if changed == 0 {
         return Err(crate::error::AppError::msg(
@@ -2269,24 +2349,29 @@ pub fn rebase_chat_file_change(
     new_new_content: Option<&str>,
     old_hash: &str,
     new_hash: &str,
+    claim_id: &str,
 ) -> AppResult<()> {
-    conn.execute(
+    let changed = conn.execute(
         "UPDATE chat_file_changes
          SET old_content = ?1, new_content = ?2,
              rebase_count = rebase_count + 1,
              last_rebased_at = ?3,
              rebased_from_old_hash = ?4,
-             rebased_from_new_hash = ?5
-         WHERE id = ?6 AND status = 'pending'",
+             rebased_from_new_hash = ?5,
+             status = 'pending', claim_id = NULL, claim_kind = NULL, claimed_at = NULL,
+             apply_journal_json = NULL
+         WHERE id = ?6 AND status = 'rebasing' AND claim_id = ?7 AND claim_kind = 'rebase'",
         params![
             new_old_content,
             new_new_content,
             Utc::now().to_rfc3339(),
             old_hash,
             new_hash,
-            change_id
+            change_id,
+            claim_id
         ],
     )?;
+    ensure_claim_updated(changed)?;
     Ok(())
 }
 
@@ -2294,13 +2379,16 @@ pub fn resolve_chat_file_change_externally(
     conn: &Connection,
     change_id: &str,
     reason: &str,
+    claim_id: &str,
 ) -> AppResult<()> {
-    conn.execute(
+    let changed = conn.execute(
         "UPDATE chat_file_changes
-         SET status = 'resolved_external', resolution_reason = ?1
-         WHERE id = ?2 AND status = 'pending'",
-        params![reason, change_id],
+         SET status = 'resolved_external', resolution_reason = ?1,
+             claim_id = NULL, claim_kind = NULL, claimed_at = NULL, apply_journal_json = NULL
+         WHERE id = ?2 AND status = 'rebasing' AND claim_id = ?3 AND claim_kind = 'rebase'",
+        params![reason, change_id, claim_id],
     )?;
+    ensure_claim_updated(changed)?;
     Ok(())
 }
 
@@ -2308,14 +2396,59 @@ pub fn conflict_chat_file_change(
     conn: &Connection,
     change_id: &str,
     reason: &str,
+    claim_id: &str,
 ) -> AppResult<()> {
-    conn.execute(
+    let changed = conn.execute(
         "UPDATE chat_file_changes
-         SET status = 'conflicted', resolution_reason = ?1
-         WHERE id = ?2 AND status = 'pending'",
-        params![reason, change_id],
+         SET status = 'conflicted', resolution_reason = ?1,
+             claim_id = NULL, claim_kind = NULL, claimed_at = NULL, apply_journal_json = NULL
+         WHERE id = ?2 AND status = 'rebasing' AND claim_id = ?3 AND claim_kind = 'rebase'",
+        params![reason, change_id, claim_id],
     )?;
+    ensure_claim_updated(changed)?;
     Ok(())
+}
+
+pub fn conflict_claimed_chat_file_change(
+    conn: &Connection,
+    change_id: &str,
+    reason: &str,
+    claim_id: &str,
+) -> AppResult<()> {
+    let changed = conn.execute(
+        "UPDATE chat_file_changes
+         SET status = 'conflicted', resolution_reason = ?1,
+             claim_id = NULL, claim_kind = NULL, claimed_at = NULL, apply_journal_json = NULL
+         WHERE id = ?2 AND status IN ('applying', 'rebasing') AND claim_id = ?3",
+        params![reason, change_id, claim_id],
+    )?;
+    ensure_claim_updated(changed)
+}
+
+fn ensure_claim_updated(changed: usize) -> AppResult<()> {
+    if changed == 0 {
+        return Err(crate::error::AppError::msg(
+            "proposal_claim_lost: proposal claim is no longer owned by this operation",
+        ));
+    }
+    Ok(())
+}
+
+pub fn mark_chat_file_change_written(
+    conn: &Connection,
+    change_id: &str,
+    claim_id: &str,
+) -> AppResult<()> {
+    let changed = conn.execute(
+        "UPDATE chat_file_changes SET apply_journal_json = ?1
+         WHERE id = ?2 AND status = 'applying' AND claim_id = ?3 AND claim_kind = 'apply'",
+        params![
+            serde_json::json!({ "phase": "written" }).to_string(),
+            change_id,
+            claim_id
+        ],
+    )?;
+    ensure_claim_updated(changed)
 }
 
 pub fn fail_chat_file_change(
@@ -2323,24 +2456,31 @@ pub fn fail_chat_file_change(
     change_id: &str,
     failure_code: &str,
     failure_message: &str,
+    claim_id: &str,
 ) -> AppResult<()> {
-    conn.execute(
+    let changed = conn.execute(
         "UPDATE chat_file_changes
-         SET status = 'failed', failure_code = ?1, failure_message = ?2, claim_id = NULL
-         WHERE id = ?3 AND status IN ('pending', 'applying')",
-        params![failure_code, failure_message, change_id],
+         SET status = 'failed', failure_code = ?1, failure_message = ?2,
+             claim_id = NULL, claim_kind = NULL, claimed_at = NULL, apply_journal_json = NULL
+         WHERE id = ?3 AND status = 'applying' AND claim_id = ?4 AND claim_kind = 'apply'",
+        params![failure_code, failure_message, change_id, claim_id],
     )?;
-    Ok(())
+    ensure_claim_updated(changed)
 }
 
-pub fn clear_chat_file_change_claim(conn: &Connection, change_id: &str) -> AppResult<()> {
-    conn.execute(
+pub fn release_chat_file_change_claim(
+    conn: &Connection,
+    change_id: &str,
+    claim_id: &str,
+) -> AppResult<()> {
+    let changed = conn.execute(
         "UPDATE chat_file_changes
-         SET claim_id = NULL, claim_kind = NULL
-         WHERE id = ?1",
-        params![change_id],
+         SET status = 'pending', claim_id = NULL, claim_kind = NULL, claimed_at = NULL,
+             apply_journal_json = NULL
+         WHERE id = ?1 AND claim_id = ?2 AND status IN ('applying', 'rebasing')",
+        params![change_id, claim_id],
     )?;
-    Ok(())
+    ensure_claim_updated(changed)
 }
 
 #[derive(Debug, Clone, Serialize)]

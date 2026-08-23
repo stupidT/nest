@@ -33,12 +33,60 @@ pub enum ReconcileOutcome {
 
 fn content_hash(content: Option<&str>) -> String {
     use std::fmt::Write as _;
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    std::hash::Hash::hash(&content, &mut hasher);
-    let hash = std::hash::Hasher::finish(&hasher);
+    let mut hash = 0xcbf29ce484222325_u64;
+    let marker = if content.is_some() { 1_u8 } else { 0_u8 };
+    hash ^= u64::from(marker);
+    hash = hash.wrapping_mul(0x100000001b3);
+    if let Some(content) = content {
+        for byte in content.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
     let mut out = String::with_capacity(16);
     let _ = write!(&mut out, "{hash:016x}");
     out
+}
+
+pub fn recover_claimed_changes(conn: &rusqlite::Connection, vault_root: &Path) -> AppResult<usize> {
+    let claimed = db::list_claimed_chat_file_changes(conn)?;
+    for change in &claimed {
+        if change.status == "rebasing" && change.claim_kind == "rebase" {
+            db::release_chat_file_change_claim(conn, &change.id, &change.claim_id)?;
+            continue;
+        }
+        if change.status != "applying" || change.claim_kind != "apply" {
+            db::conflict_claimed_chat_file_change(
+                conn,
+                &change.id,
+                "startup recovery found an invalid proposal claim state",
+                &change.claim_id,
+            )?;
+            continue;
+        }
+        let disk = vault::read_file(vault_root, &change.path).ok();
+        let disk_hash = content_hash(disk.as_deref());
+        match (
+            change.expected_old_hash.as_deref(),
+            change.expected_new_hash.as_deref(),
+        ) {
+            (_, Some(expected_new)) if disk_hash == expected_new => {
+                db::approve_chat_file_change(conn, &change.id, &change.claim_id)?;
+            }
+            (Some(expected_old), _) if disk_hash == expected_old => {
+                db::release_chat_file_change_claim(conn, &change.id, &change.claim_id)?;
+            }
+            _ => {
+                db::conflict_claimed_chat_file_change(
+                    conn,
+                    &change.id,
+                    "startup recovery found workspace content outside the apply journal",
+                    &change.claim_id,
+                )?;
+            }
+        }
+    }
+    Ok(claimed.len())
 }
 
 pub fn reconcile_pending_change(
@@ -52,73 +100,92 @@ pub fn reconcile_pending_change(
     }
     let old_hash = content_hash(change.old_content.as_deref());
     let new_hash = content_hash(change.new_content.as_deref());
-    match (&change.old_content, &change.new_content, &current) {
-        (Some(old), Some(_), Some(disk)) => {
-            if disk == change.new_content.as_deref().unwrap() {
+    let claim_id = uuid::Uuid::new_v4().to_string();
+    {
+        let conn = state.db.lock();
+        db::claim_chat_file_change(&conn, &change.id, &claim_id, "rebase", None, None)?;
+    }
+    let result = (|| -> AppResult<ReconcileOutcome> {
+        match (&change.old_content, &change.new_content, &current) {
+            (Some(old), Some(_), Some(disk)) => {
+                if disk == change.new_content.as_deref().unwrap() {
+                    {
+                        let conn = state.db.lock();
+                        db::resolve_chat_file_change_externally(
+                            &conn,
+                            &change.id,
+                            "proposal already satisfied by external change",
+                            &claim_id,
+                        )?;
+                    }
+                    Ok(ReconcileOutcome::ResolvedExternal)
+                } else {
+                    let _ = old;
+                    let base = change.old_content.as_deref().unwrap_or("");
+                    let proposed = change.new_content.as_deref().unwrap_or("");
+                    match crate::knowledge_merge::merge_text(base, proposed, disk) {
+                        crate::knowledge_merge::MergeOutcome::Clean(merged) => {
+                            if merged == disk.as_str() {
+                                {
+                                    let conn = state.db.lock();
+                                    db::resolve_chat_file_change_externally(
+                                        &conn,
+                                        &change.id,
+                                        "clean merge equals current disk content",
+                                        &claim_id,
+                                    )?;
+                                }
+                                Ok(ReconcileOutcome::ResolvedExternal)
+                            } else {
+                                {
+                                    let conn = state.db.lock();
+                                    db::rebase_chat_file_change(
+                                        &conn,
+                                        &change.id,
+                                        Some(disk),
+                                        Some(&merged),
+                                        &old_hash,
+                                        &new_hash,
+                                        &claim_id,
+                                    )?;
+                                }
+                                Ok(ReconcileOutcome::Rebased)
+                            }
+                        }
+                        crate::knowledge_merge::MergeOutcome::Conflicted => {
+                            {
+                                let conn = state.db.lock();
+                                db::conflict_chat_file_change(
+                                    &conn,
+                                    &change.id,
+                                    "overlapping edits conflict with external changes",
+                                    &claim_id,
+                                )?;
+                            }
+                            Ok(ReconcileOutcome::Conflicted)
+                        }
+                    }
+                }
+            }
+            _ => {
                 {
                     let conn = state.db.lock();
-                    db::resolve_chat_file_change_externally(
+                    db::conflict_chat_file_change(
                         &conn,
                         &change.id,
-                        "proposal already satisfied by external change",
+                        "create/delete proposal cannot be auto-merged with external change",
+                        &claim_id,
                     )?;
                 }
-                return Ok(ReconcileOutcome::ResolvedExternal);
-            }
-            let _ = old;
-            let base = change.old_content.as_deref().unwrap_or("");
-            let proposed = change.new_content.as_deref().unwrap_or("");
-            match crate::knowledge_merge::merge_text(base, proposed, disk) {
-                crate::knowledge_merge::MergeOutcome::Clean(merged) => {
-                    if merged == disk.as_str() {
-                        {
-                            let conn = state.db.lock();
-                            db::resolve_chat_file_change_externally(
-                                &conn,
-                                &change.id,
-                                "clean merge equals current disk content",
-                            )?;
-                        }
-                        return Ok(ReconcileOutcome::ResolvedExternal);
-                    }
-                    {
-                        let conn = state.db.lock();
-                        db::rebase_chat_file_change(
-                            &conn,
-                            &change.id,
-                            Some(disk),
-                            Some(&merged),
-                            &old_hash,
-                            &new_hash,
-                        )?;
-                    }
-                    Ok(ReconcileOutcome::Rebased)
-                }
-                crate::knowledge_merge::MergeOutcome::Conflicted => {
-                    {
-                        let conn = state.db.lock();
-                        db::conflict_chat_file_change(
-                            &conn,
-                            &change.id,
-                            "overlapping edits conflict with external changes",
-                        )?;
-                    }
-                    Ok(ReconcileOutcome::Conflicted)
-                }
+                Ok(ReconcileOutcome::Conflicted)
             }
         }
-        _ => {
-            {
-                let conn = state.db.lock();
-                db::conflict_chat_file_change(
-                    &conn,
-                    &change.id,
-                    "create/delete proposal cannot be auto-merged with external change",
-                )?;
-            }
-            Ok(ReconcileOutcome::Conflicted)
-        }
+    })();
+    if result.is_err() {
+        let conn = state.db.lock();
+        let _ = db::release_chat_file_change_claim(&conn, &change.id, &claim_id);
     }
+    result
 }
 
 pub struct KnowledgeReview;
@@ -163,48 +230,60 @@ impl KnowledgeReview {
             return Ok(ReviewOutcome::Conflicted);
         }
         let claim_id = uuid::Uuid::new_v4().to_string();
+        let expected_old_hash = content_hash(change.old_content.as_deref());
+        let expected_new_hash = content_hash(change.new_content.as_deref());
         {
             let conn = state.db.lock();
-            db::claim_chat_file_change(&conn, change_id, &claim_id)?;
+            db::claim_chat_file_change(
+                &conn,
+                change_id,
+                &claim_id,
+                "apply",
+                Some(&expected_old_hash),
+                Some(&expected_new_hash),
+            )?;
         }
 
         let applied = Self::apply_change(state, &change);
-        let result = {
-            let conn = state.db.lock();
-            match &applied {
-                Ok(()) => db::approve_chat_file_change(&conn, change_id),
-                Err(error) => {
-                    db::fail_chat_file_change(&conn, change_id, "apply_failed", &error.to_string())
-                }
-            }
-        };
-        if let Err(status_error) = result {
-            if applied.is_ok() {
-                rollback_files(
-                    &state.vault_path(),
-                    &[(change.path.clone(), change.old_content.clone())],
-                );
-            }
-            let conn = state.db.lock();
-            let _ = db::clear_chat_file_change_claim(&conn, change_id);
-            return Ok(ReviewOutcome::Failed {
-                code: "apply_status_failed".to_string(),
-                message: status_error.to_string(),
-            });
-        }
         match applied {
             Ok(()) => {
                 {
                     let conn = state.db.lock();
-                    db::clear_chat_file_change_claim(&conn, change_id)?;
+                    if let Err(error) =
+                        db::mark_chat_file_change_written(&conn, change_id, &claim_id)
+                            .and_then(|_| db::approve_chat_file_change(&conn, change_id, &claim_id))
+                    {
+                        return Ok(ReviewOutcome::Failed {
+                            code: "apply_status_failed".to_string(),
+                            message: error.to_string(),
+                        });
+                    }
                 }
                 let _ = crate::indexing::schedule(state);
                 Ok(ReviewOutcome::Approved)
             }
-            Err(error) => Ok(ReviewOutcome::Failed {
-                code: "apply_failed".to_string(),
-                message: error.to_string(),
-            }),
+            Err(error) => {
+                let status = {
+                    let conn = state.db.lock();
+                    db::fail_chat_file_change(
+                        &conn,
+                        change_id,
+                        "apply_failed",
+                        &error.to_string(),
+                        &claim_id,
+                    )
+                };
+                Ok(ReviewOutcome::Failed {
+                    code: if status.is_ok() {
+                        "apply_failed".to_string()
+                    } else {
+                        "apply_status_failed".to_string()
+                    },
+                    message: status
+                        .err()
+                        .map_or_else(|| error.to_string(), |e| e.to_string()),
+                })
+            }
         }
     }
 
@@ -506,5 +585,110 @@ mod reconcile_tests {
             KnowledgeReview::review(&env.state, &id, true).unwrap(),
             ReviewOutcome::Approved
         ));
+    }
+
+    #[test]
+    fn only_claim_owner_can_commit_apply() {
+        let env = setup("p", "a.md", "old");
+        let id = insert_pending(&env, "p/a.md", Some("old"), Some("new"));
+        let conn = env.state.db.lock();
+        db::claim_chat_file_change(
+            &conn,
+            &id,
+            "owner-a",
+            "apply",
+            Some(&content_hash(Some("old"))),
+            Some(&content_hash(Some("new"))),
+        )
+        .unwrap();
+        assert!(db::approve_chat_file_change(&conn, &id, "owner-b").is_err());
+        assert_eq!(
+            db::get_chat_file_change(&conn, &id).unwrap().status,
+            "applying"
+        );
+    }
+
+    #[test]
+    fn startup_recovery_commits_a_completed_write() {
+        let env = setup("p", "a.md", "old");
+        let id = insert_pending(&env, "p/a.md", Some("old"), Some("new"));
+        {
+            let conn = env.state.db.lock();
+            db::claim_chat_file_change(
+                &conn,
+                &id,
+                "owner",
+                "apply",
+                Some(&content_hash(Some("old"))),
+                Some(&content_hash(Some("new"))),
+            )
+            .unwrap();
+            db::mark_chat_file_change_written(&conn, &id, "owner").unwrap();
+        }
+        std::fs::write(env.state.vault_path().join("p/a.md"), "new").unwrap();
+        {
+            let conn = env.state.db.lock();
+            assert_eq!(
+                recover_claimed_changes(&conn, &env.state.vault_path()).unwrap(),
+                1
+            );
+        }
+        assert_eq!(current_change(&env, &id).status, "approved");
+    }
+
+    #[test]
+    fn startup_recovery_releases_an_unwritten_apply() {
+        let env = setup("p", "a.md", "old");
+        let id = insert_pending(&env, "p/a.md", Some("old"), Some("new"));
+        {
+            let conn = env.state.db.lock();
+            db::claim_chat_file_change(
+                &conn,
+                &id,
+                "owner",
+                "apply",
+                Some(&content_hash(Some("old"))),
+                Some(&content_hash(Some("new"))),
+            )
+            .unwrap();
+            recover_claimed_changes(&conn, &env.state.vault_path()).unwrap();
+        }
+        assert_eq!(current_change(&env, &id).status, "pending");
+    }
+
+    #[test]
+    fn startup_recovery_conflicts_an_ambiguous_apply() {
+        let env = setup("p", "a.md", "old");
+        let id = insert_pending(&env, "p/a.md", Some("old"), Some("new"));
+        {
+            let conn = env.state.db.lock();
+            db::claim_chat_file_change(
+                &conn,
+                &id,
+                "owner",
+                "apply",
+                Some(&content_hash(Some("old"))),
+                Some(&content_hash(Some("new"))),
+            )
+            .unwrap();
+        }
+        std::fs::write(env.state.vault_path().join("p/a.md"), "other").unwrap();
+        {
+            let conn = env.state.db.lock();
+            recover_claimed_changes(&conn, &env.state.vault_path()).unwrap();
+        }
+        assert_eq!(current_change(&env, &id).status, "conflicted");
+    }
+
+    #[test]
+    fn startup_recovery_releases_an_interrupted_rebase() {
+        let env = setup("p", "a.md", "old");
+        let id = insert_pending(&env, "p/a.md", Some("old"), Some("new"));
+        {
+            let conn = env.state.db.lock();
+            db::claim_chat_file_change(&conn, &id, "owner", "rebase", None, None).unwrap();
+            recover_claimed_changes(&conn, &env.state.vault_path()).unwrap();
+        }
+        assert_eq!(current_change(&env, &id).status, "pending");
     }
 }

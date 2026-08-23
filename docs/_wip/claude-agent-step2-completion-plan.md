@@ -18,7 +18,7 @@
 
 - [x] Vault manifest、等待式 Reindex 与 degraded-mode capability gate
 - [x] staged change 与 Direct Workspace Change 二次归并及大文件安全边界
-- [ ] Proposal claim、apply journal 与启动恢复
+- [x] Proposal claim、apply journal 与启动恢复
 - [ ] 完整 Claude 两轮六工具 connection probe
 - [ ] Backend Descriptor、Knowledge effective view 与 app-wide operation slot
 - [ ] 全量回归、Windows 手工验收与 Step 2 最终收口
