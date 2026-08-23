@@ -498,11 +498,14 @@ export type ChatFileChangeSummary = {
   id: string;
   path: string;
   operation: ChatFileOperation;
-  status: "pending" | "approved" | "rejected";
+  status: "pending" | "approved" | "rejected" | "conflicted" | "resolved_external" | "failed";
 };
 export type ChatFileChangeDetail = ChatFileChangeSummary & {
   old_content: string | null;
   new_content: string | null;
+  rebase_count?: number;
+  last_rebased_at?: string | null;
+  resolution_reason?: string | null;
 };
 
 export type ChatBackend = "nest" | "claude";
