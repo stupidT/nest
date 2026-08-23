@@ -42,7 +42,6 @@ pub fn claude_mode_for(session: &ChatSession) -> Option<TurnMode> {
 }
 
 pub async fn run_chat(request: ChatRunRequest) -> Result<ChatRunResult, crate::error::AppError> {
-    crate::vault_reconciliation::ensure_workspace_healthy(&request.state)?;
     match request.session.backend {
         Some(ChatBackend::Nest) => run_nest(request).await,
         Some(ChatBackend::Claude) => run_claude(request).await,
@@ -53,6 +52,7 @@ pub async fn run_chat(request: ChatRunRequest) -> Result<ChatRunResult, crate::e
 }
 
 async fn run_nest(request: ChatRunRequest) -> Result<ChatRunResult, crate::error::AppError> {
+    crate::vault_reconciliation::ensure_workspace_healthy(&request.state)?;
     let ChatRunRequest {
         app,
         state,
@@ -226,7 +226,8 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
         }),
     };
 
-    let instructions = nest_system_instructions(chat_mode);
+    let knowledge_available = !crate::vault_reconciliation::load_health(&state).reindex_required;
+    let instructions = nest_system_instructions(chat_mode, knowledge_available);
     let composed_prompt = compose_focus_prompt(&query, &focus_paths, &vault_root);
     let turn_request = ClaudeTurnRequest {
         vault_root: &vault_root,
@@ -250,11 +251,15 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
                 let conn = state.db.lock();
                 let _ = db::finalize_running_tool_activities(&conn, &request.turn_id, "failed");
             }
-            if let Err(reconcile_error) = crate::vault_reconciliation::reconcile_vault(&state) {
-                let _ = crate::vault_reconciliation::set_reindex_required(
-                    &state,
-                    &format!("workspace_reconciliation_failed: {reconcile_error}"),
-                );
+            if let Err(reconcile_error) = crate::vault_reconciliation::reconcile_vault(
+                &state,
+                std::time::Duration::from_secs(300),
+            )
+            .await
+            {
+                let warning = format!("workspace_reconciliation_failed: {reconcile_error}");
+                let conn = state.db.lock();
+                let _ = db::set_chat_turn_warnings(&conn, &request.turn_id, &[warning]);
             }
             let mapped = map_turn_error(&error);
             if is_unresumable_failure(&error) {
@@ -312,11 +317,13 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
         let conn = state.db.lock();
         let _ = db::finalize_running_tool_activities(&conn, &request.turn_id, "succeeded");
     }
-    if let Err(error) = crate::vault_reconciliation::reconcile_vault(&state) {
-        let _ = crate::vault_reconciliation::set_reindex_required(
-            &state,
-            &format!("workspace_reconciliation_failed: {error}"),
-        );
+    if let Err(reconcile_error) =
+        crate::vault_reconciliation::reconcile_vault(&state, std::time::Duration::from_secs(300))
+            .await
+    {
+        let warning = format!("workspace_reconciliation_failed: {reconcile_error}");
+        let conn = state.db.lock();
+        let _ = db::set_chat_turn_warnings(&conn, &request.turn_id, &[warning]);
     }
 
     Ok(ChatRunResult {
@@ -384,7 +391,13 @@ pub fn tool_kind_for(name: &str) -> &'static str {
     }
 }
 
-pub fn nest_system_instructions(mode: crate::knowledge_workspace::CapabilityMode) -> String {
+pub fn nest_system_instructions(
+    mode: crate::knowledge_workspace::CapabilityMode,
+    knowledge_available: bool,
+) -> String {
+    if !knowledge_available {
+        return "Nest knowledge integration:\nNest Knowledge is temporarily unavailable until workspace reindex completes. Continue with Claude native tools or external MCP tools; do not claim Nest citations or reviewable proposals are available.".to_string();
+    }
     let mode_line = match mode {
         crate::knowledge_workspace::CapabilityMode::Ask => "You are in Ask mode: read-only. Use only the read-only Nest tools (knowledge_search, knowledge_list, knowledge_read) plus your built-in read-only tools.",
         crate::knowledge_workspace::CapabilityMode::Agent => "You are in Agent mode. You may use all six Nest knowledge tools (knowledge_search, knowledge_list, knowledge_read, knowledge_create, knowledge_replace, knowledge_delete).",

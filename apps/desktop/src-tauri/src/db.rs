@@ -1573,6 +1573,23 @@ pub fn finish_chat_turn(
     Ok(())
 }
 
+pub fn set_chat_turn_warnings(
+    conn: &Connection,
+    turn_id: &str,
+    warnings: &[String],
+) -> AppResult<()> {
+    let value = if warnings.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(warnings)?)
+    };
+    conn.execute(
+        "UPDATE chat_turns SET warnings_json = ?1 WHERE id = ?2",
+        params![value, turn_id],
+    )?;
+    Ok(())
+}
+
 pub fn commit_assistant_and_finish_turn(
     conn: &mut Connection,
     turn_id: &str,

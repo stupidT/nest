@@ -26,6 +26,7 @@ pub struct ActiveTurn {
     pub session_id: String,
     pub turn_id: String,
     pub mode: CapabilityMode,
+    pub knowledge_available: bool,
     pub workspace: RwLock<KnowledgeWorkspace>,
     pub citations: RwLock<Vec<crate::db::Citation>>,
     pub tool_sequence: std::sync::atomic::AtomicI64,
@@ -118,6 +119,8 @@ impl McpServerState {
             session_id: session_id.to_string(),
             turn_id: turn_id.to_string(),
             mode,
+            knowledge_available: !crate::vault_reconciliation::load_health(&self.state)
+                .reindex_required,
             workspace: RwLock::new(KnowledgeWorkspace::open_turn(
                 self.state.clone(),
                 mode,
@@ -330,13 +333,16 @@ async fn dispatch(server: &Arc<McpServerState>, message: &Value) -> Value {
         "notifications/initialized" => Value::Null,
         "ping" => ok_result(id, json!({})),
         "tools/list" => {
-            let mode = server
+            let (mode, knowledge_available) = server
                 .active_turn
                 .read()
                 .as_ref()
-                .map(|turn| turn.mode)
-                .unwrap_or(CapabilityMode::Ask);
-            ok_result(id, json!({ "tools": tool_definitions(mode) }))
+                .map(|turn| (turn.mode, turn.knowledge_available))
+                .unwrap_or((CapabilityMode::Ask, false));
+            ok_result(
+                id,
+                json!({ "tools": tool_definitions(mode, knowledge_available) }),
+            )
         }
         "tools/call" => {
             let name = message
@@ -383,7 +389,10 @@ fn ok_result(id: Option<Value>, result: Value) -> Value {
     })
 }
 
-fn tool_definitions(mode: CapabilityMode) -> Vec<Value> {
+fn tool_definitions(mode: CapabilityMode, knowledge_available: bool) -> Vec<Value> {
+    if !knowledge_available {
+        return Vec::new();
+    }
     let mut tools = vec![
         tool_definition(
             "knowledge_search",
@@ -524,6 +533,12 @@ async fn call_tool_inner(
         let Some(active) = turn.as_ref() else {
             return Err(KnowledgeError::new("permission_denied", "no active turn"));
         };
+        if !active.knowledge_available {
+            return Err(KnowledgeError::new(
+                "reindex_required",
+                "Nest Knowledge is unavailable until workspace reindex completes",
+            ));
+        }
         active.mode
     };
     if !crate::knowledge_workspace::capability_allowed(mode, capability) {
@@ -649,9 +664,9 @@ mod tests {
 
     #[test]
     fn tool_definitions_match_mode_matrix() {
-        let ask = tool_definitions(CapabilityMode::Ask);
+        let ask = tool_definitions(CapabilityMode::Ask, true);
         assert_eq!(ask.len(), 3);
-        let agent = tool_definitions(CapabilityMode::Agent);
+        let agent = tool_definitions(CapabilityMode::Agent, true);
         assert_eq!(agent.len(), 6);
         let names: Vec<&str> = agent
             .iter()
@@ -659,6 +674,11 @@ mod tests {
             .collect();
         assert!(names.contains(&"knowledge_create"));
         assert!(names.contains(&"knowledge_delete"));
+    }
+
+    #[test]
+    fn degraded_workspace_exposes_no_knowledge_tools() {
+        assert!(tool_definitions(CapabilityMode::Agent, false).is_empty());
     }
 
     #[test]

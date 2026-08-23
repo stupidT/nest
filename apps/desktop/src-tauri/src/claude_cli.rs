@@ -2721,6 +2721,7 @@ for (const line of lines) { console.log(line); }
         let detection = fx.write_fake_cli(script);
         let instructions = crate::chat_runtime::nest_system_instructions(
             crate::knowledge_workspace::CapabilityMode::Agent,
+            true,
         );
         let request = ClaudeTurnRequest {
             vault_root: &fx.vault_root(),

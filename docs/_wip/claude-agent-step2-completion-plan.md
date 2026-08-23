@@ -14,6 +14,15 @@
 
 剩余工作集中在五个方面：Vault Reconciliation、turn 内二次归并、Proposal claim 与崩溃恢复、真实端到端 connection probe，以及通用 Backend/lifecycle 架构收口。
 
+### 1.1 实施状态
+
+- [x] Vault manifest、等待式 Reindex 与 degraded-mode capability gate
+- [ ] staged change 与 Direct Workspace Change 二次归并及大文件安全边界
+- [ ] Proposal claim、apply journal 与启动恢复
+- [ ] 完整 Claude 两轮六工具 connection probe
+- [ ] Backend Descriptor、Knowledge effective view 与 app-wide operation slot
+- [ ] 全量回归、Windows 手工验收与 Step 2 最终收口
+
 ## 2. P0：Vault Reconciliation 与 Reindex 闭环
 
 ### 2.1 实现内容

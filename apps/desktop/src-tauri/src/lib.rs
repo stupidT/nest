@@ -47,13 +47,17 @@ pub fn run() {
             let state = AppState::new(app_data)?;
             app.manage(Arc::new(state) as SharedState);
             let shared_state = app.state::<SharedState>();
-            if let Err(error) = vault_reconciliation::reconcile_vault(&shared_state) {
-                nest_debug!("app", "startup reconciliation failed: {error}");
-                let _ = vault_reconciliation::set_reindex_required(
-                    &shared_state,
-                    &format!("startup reconciliation failed: {error}"),
-                );
-            }
+            let startup_state = shared_state.inner().clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = vault_reconciliation::reconcile_vault(
+                    &startup_state,
+                    std::time::Duration::from_secs(300),
+                )
+                .await
+                {
+                    nest_debug!("app", "startup reconciliation failed: {error}");
+                }
+            });
             if indexing::status(&shared_state)?.indexed_chunks == 0 {
                 indexing::schedule(&shared_state)?;
             }

@@ -10,10 +10,9 @@ pub fn workspace_health(
 }
 
 #[tauri::command]
-pub fn workspace_reindex(
+pub async fn workspace_reindex(
     state: State<'_, SharedState>,
 ) -> AppResult<crate::vault_reconciliation::WorkspaceHealth> {
-    crate::indexing::schedule(&state)?;
-    crate::vault_reconciliation::clear_reindex_required(&state)?;
-    Ok(crate::vault_reconciliation::load_health(&state))
+    crate::vault_reconciliation::restore_workspace(&state, std::time::Duration::from_secs(300))
+        .await
 }

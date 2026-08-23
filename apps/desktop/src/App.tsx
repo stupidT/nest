@@ -457,6 +457,7 @@ export default function App() {
 
 function WorkspaceHealthBanner() {
   const [reindexing, setReindexing] = useState(false);
+  const queryClient = useQueryClient();
   const healthQuery = useQuery({
     queryKey: queryKeys.workspaceHealth,
     queryFn: api.workspaceHealth,
@@ -469,6 +470,10 @@ function WorkspaceHealthBanner() {
     setReindexing(true);
     void api
       .workspaceReindex()
+      .then((next) => {
+        queryClient.setQueryData(queryKeys.workspaceHealth, next);
+        void queryClient.invalidateQueries({ queryKey: queryKeys.index });
+      })
       .catch(() => undefined)
       .finally(() => setReindexing(false));
   };

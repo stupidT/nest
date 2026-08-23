@@ -15,6 +15,7 @@ struct IndexingState {
     is_indexing: AtomicBool,
     index_generation: AtomicU64,
     indexed_generation: AtomicU64,
+    successful_generation: AtomicU64,
 }
 
 impl IndexingState {
@@ -23,6 +24,7 @@ impl IndexingState {
             is_indexing: AtomicBool::new(false),
             index_generation: AtomicU64::new(0),
             indexed_generation: AtomicU64::new(0),
+            successful_generation: AtomicU64::new(0),
         }
     }
 }
@@ -163,14 +165,23 @@ impl AppState {
         self.indexing.index_generation.load(Ordering::SeqCst)
     }
 
-    pub fn mark_index_generation_complete(&self, generation: u64) {
+    pub fn mark_index_generation_complete(&self, generation: u64, succeeded: bool) {
         self.indexing
             .indexed_generation
             .store(generation, Ordering::SeqCst);
+        if succeeded {
+            self.indexing
+                .successful_generation
+                .store(generation, Ordering::SeqCst);
+        }
     }
 
     pub fn indexed_generation(&self) -> u64 {
         self.indexing.indexed_generation.load(Ordering::SeqCst)
+    }
+
+    pub fn successful_index_generation(&self) -> u64 {
+        self.indexing.successful_generation.load(Ordering::SeqCst)
     }
 
     /// Begin a chat generation with a fresh cancellation receiver. A watch
