@@ -471,10 +471,6 @@ mod reconcile_tests {
             KnowledgeReview::review(&env.state, &id, true).is_err(),
             "approving a conflicted proposal must fail outright"
         );
-        assert!(
-            matches!(KnowledgeReview::review(&env.state, &id, true), Err(_)),
-            "approving a conflicted proposal must fail outright"
-        );
         assert!(matches!(
             KnowledgeReview::review(&env.state, &id, false).unwrap(),
             ReviewOutcome::Rejected
