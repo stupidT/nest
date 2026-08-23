@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MergeOutcome {
     Clean(String),
@@ -106,14 +108,11 @@ pub fn merge_text(base: &str, proposed: &str, current: &str) -> MergeOutcome {
     }
     let mut combined: Vec<(usize, usize, String)> = Vec::new();
     for (start, end) in &proposed_hunks {
-        let segment = proposed_lines
-            [inserted_range(&proposed_patch, &proposed_lines, *start, *end)]
-        .join("\n");
+        let segment = proposed_lines[inserted_range(&proposed_patch, *start, *end)].join("\n");
         combined.push((*start, *end, segment));
     }
     for (start, end) in &current_hunks {
-        let segment =
-            current_lines[inserted_range(&current_patch, &current_lines, *start, *end)].join("\n");
+        let segment = current_lines[inserted_range(&current_patch, *start, *end)].join("\n");
         combined.push((*start, *end, segment));
     }
     combined.sort_by_key(|(start, _, _)| *start);
@@ -169,12 +168,7 @@ fn collect_hunks(patch: &[Hunk], hunks: &mut Vec<(usize, usize)>, base_idx: &mut
     }
 }
 
-fn inserted_range<'a>(
-    patch: &[Hunk],
-    new_lines: &[&'a str],
-    start: usize,
-    end: usize,
-) -> std::ops::Range<usize> {
+fn inserted_range(patch: &[Hunk], start: usize, end: usize) -> std::ops::Range<usize> {
     let mut base_idx = 0;
     let mut new_idx = 0;
     let mut range_start: Option<usize> = None;

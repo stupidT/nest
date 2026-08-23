@@ -239,7 +239,7 @@ async fn run_claude_driven_probe(
     };
     drop(called1);
 
-    let turn1_create_ok = staged1.iter().any(|c| {
+    let turn1_create = staged1.iter().find(|c| {
         c.operation == "created"
             && c.path == env.probe_path
             && c.new_content
@@ -247,10 +247,16 @@ async fn run_claude_driven_probe(
                 .map(|t| t.contains(&env.challenge))
                 .unwrap_or(false)
     });
-    if !turn1_create_ok {
+    if turn1_create.is_none() {
         failures.push(
             "probe turn 1 did not stage a knowledge_create containing the marker".to_string(),
         );
+    }
+    if let Some(content) = turn1_create.and_then(|c| c.new_content.clone()) {
+        if let Err(error) = crate::vault::write_file(&state.vault_path(), &env.probe_path, &content)
+        {
+            failures.push(format!("probe turn 1 materialization failed: {error}"));
+        }
     }
 
     let probe_turn2_id = uuid::Uuid::new_v4().to_string();
