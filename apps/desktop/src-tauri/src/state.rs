@@ -38,6 +38,7 @@ pub struct AppState {
     pub hub_auth: Mutex<Option<AuthSession>>,
     pub hub_auth_refresh: tokio::sync::Mutex<()>,
     pub mcp: Mutex<Option<McpRuntime>>,
+    chat_turn_slot: std::sync::atomic::AtomicBool,
 }
 
 pub struct McpRuntime {
@@ -70,6 +71,7 @@ impl AppState {
             hub_auth: Mutex::new(None),
             hub_auth_refresh: tokio::sync::Mutex::new(()),
             mcp: Mutex::new(None),
+            chat_turn_slot: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -86,12 +88,27 @@ impl AppState {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub async fn stop_mcp_server(&self) {
         let runtime = self.mcp.lock().take();
         if let Some(runtime) = runtime {
             runtime.handle.stop().await;
         }
+    }
+
+    pub fn try_begin_chat_turn(&self) -> bool {
+        self.chat_turn_slot
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_ok()
+    }
+
+    pub fn end_chat_turn(&self) {
+        self.chat_turn_slot
+            .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub fn vault_path(&self) -> PathBuf {

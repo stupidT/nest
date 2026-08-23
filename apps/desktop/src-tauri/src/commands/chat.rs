@@ -202,6 +202,19 @@ pub async fn chat_send(
     let focus = focus_paths.unwrap_or_default();
     let app_data_dir = state.app_data_dir.clone();
 
+    if !state.try_begin_chat_turn() {
+        return Err(crate::error::AppError::msg(
+            "chat_turn_busy: another chat turn is already running",
+        ));
+    }
+    let _turn_slot = TurnSlotGuard(state.inner().clone());
+    struct TurnSlotGuard(SharedState);
+    impl Drop for TurnSlotGuard {
+        fn drop(&mut self) {
+            self.0.end_chat_turn();
+        }
+    }
+
     let existing_session = {
         let conn = state.db.lock();
         db::get_session(&conn, &session_id)?.ok_or_else(|| {

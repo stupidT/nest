@@ -65,7 +65,23 @@ pub async fn run_six_tool_probe(
     }
     let create_path = format!("{pack_dir}/probe.md");
     let challenge = format!("nest-probe-{}", uuid::Uuid::new_v4().simple());
-    let credential = server.begin_turn(&probe_session, "probe", CapabilityMode::Agent, Vec::new());
+    let credential =
+        match server.begin_turn(&probe_session, "probe", CapabilityMode::Agent, Vec::new()) {
+            Ok(credential) => credential,
+            Err(error) => {
+                let _ = std::fs::remove_dir_all(state.vault_path().join(&pack_dir));
+                {
+                    let conn = state.db.lock();
+                    let _ = crate::db::purge_path_data(&conn, &pack_dir);
+                }
+                handle.stop().await;
+                return ProbeOutcome {
+                    tools_exercised: Vec::new(),
+                    failures: vec![error],
+                    cleanup_warnings: Vec::new(),
+                };
+            }
+        };
     let client = reqwest::Client::new();
     let url = format!("http://127.0.0.1:{}/mcp", handle.port);
     let auth = format!("Bearer {credential}");

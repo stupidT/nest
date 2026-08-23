@@ -61,6 +61,9 @@ pub fn ensure_seeded(conn: &Connection, app_data_dir: &Path, vault_root: &Path) 
 }
 
 fn dev_force_reseed() -> bool {
+    if !cfg!(debug_assertions) {
+        return false;
+    }
     matches!(
         std::env::var("NEST_DEV_RESEED").ok().as_deref(),
         Some("1") | Some("true") | Some("yes") | Some("on")

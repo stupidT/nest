@@ -3,7 +3,8 @@ use crate::chat_events::ChatStreamEvent;
 use crate::claude_cli::{self, ClaudeTurnRequest, TurnEvents, TurnMode};
 use crate::db::{self, ChatBackend, ChatBackendStatus, ChatSession};
 use crate::state::SharedState;
-use std::path::PathBuf;
+use crate::vault;
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter};
 
 pub struct ChatRunRequest {
@@ -99,6 +100,8 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
         session,
         query,
         mode,
+        focus_paths,
+        protected_paths,
         stream_event,
         ..
     } = request;
@@ -130,13 +133,48 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
     let state_for_init = state.clone();
     let app_token = app.clone();
     let stream_token = stream_event.clone();
+
+    state.ensure_mcp_server().await?;
+    let (mcp_server, mcp_config_path) = {
+        let mcp = state.mcp.lock();
+        let runtime = mcp
+            .as_ref()
+            .ok_or_else(|| crate::error::AppError::msg("nest_mcp_unavailable"))?;
+        let credential = runtime
+            .server
+            .begin_turn(
+                &session_id,
+                &request.turn_id,
+                chat_mode,
+                protected_paths.clone(),
+            )
+            .map_err(crate::error::AppError::msg)?;
+        let sink_app = app.clone();
+        let sink_event = stream_event.clone();
+        runtime
+            .server
+            .set_event_sink(Box::new(move |label, target, done| {
+                use tauri::Emitter;
+                let _ = sink_app.emit(
+                    &sink_event,
+                    ChatStreamEvent::ToolActivity {
+                        label: label.to_string(),
+                        target: target.map(str::to_string),
+                        done,
+                    },
+                );
+            }));
+        let config_path =
+            std::env::temp_dir().join(format!("nest-mcp-{}.json", uuid::Uuid::new_v4().simple()));
+        std::fs::write(&config_path, runtime.handle.config_json(&credential))?;
+        (runtime.server.clone(), config_path)
+    };
+
     let app_thinking = app.clone();
     let stream_thinking = stream_event.clone();
     let app_tool = app.clone();
     let stream_tool = stream_event.clone();
-    let state_for_tools = state.clone();
-    let turn_id_for_tools = request.turn_id.clone();
-    let tool_sequence = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0));
+    let server_for_tools = mcp_server.clone();
     let events = TurnEvents {
         token: Box::new(move |text| {
             let _ = app_token.emit(
@@ -177,17 +215,7 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
                     done: false,
                 },
             );
-            let sequence = tool_sequence.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let conn = state_for_tools.db.lock();
-            let _ = db::insert_tool_activity(
-                &conn,
-                &turn_id_for_tools,
-                sequence,
-                "claude_native",
-                tool_kind_for(name),
-                name,
-                target,
-            );
+            server_for_tools.record_native_activity(name, target);
         }),
         initialized: Box::new(move |session_id, _model, _version| {
             let conn = state_for_init.db.lock();
@@ -197,43 +225,13 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
         }),
     };
 
-    state.ensure_mcp_server().await?;
-    let (mcp_server, mcp_config_path) = {
-        let mcp = state.mcp.lock();
-        let runtime = mcp
-            .as_ref()
-            .ok_or_else(|| crate::error::AppError::msg("nest_mcp_unavailable"))?;
-        let credential =
-            runtime
-                .server
-                .begin_turn(&session_id, &request.turn_id, chat_mode, Vec::new());
-        let sink_app = app.clone();
-        let sink_event = stream_event.clone();
-        runtime
-            .server
-            .set_event_sink(Box::new(move |label, target, done| {
-                use tauri::Emitter;
-                let _ = sink_app.emit(
-                    &sink_event,
-                    ChatStreamEvent::ToolActivity {
-                        label: label.to_string(),
-                        target: target.map(str::to_string),
-                        done,
-                    },
-                );
-            }));
-        let config_path =
-            std::env::temp_dir().join(format!("nest-mcp-{}.json", uuid::Uuid::new_v4().simple()));
-        std::fs::write(&config_path, runtime.handle.config_json(&credential))?;
-        (runtime.server.clone(), config_path)
-    };
-
     let instructions = nest_system_instructions(chat_mode);
+    let composed_prompt = compose_focus_prompt(&query, &focus_paths, &vault_root);
     let turn_request = ClaudeTurnRequest {
         vault_root: &vault_root,
         session_id: &session_id,
         mode: turn_mode,
-        prompt: &query,
+        prompt: &composed_prompt,
         model: request.requested_model.cli_model_arg(),
         chat_mode,
         mcp_config_path: Some(mcp_config_path.as_path()),
@@ -275,7 +273,22 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
         }
     };
 
-    let file_changes = mcp_server.finish_staged().unwrap_or_default();
+    let file_changes = match mcp_server.finish_staged() {
+        Ok(changes) => changes,
+        Err(error) => {
+            mcp_server.abort_staged();
+            mcp_server.end_turn();
+            mcp_server.clear_event_sink();
+            let _ = std::fs::remove_file(&mcp_config_path);
+            {
+                let conn = state.db.lock();
+                let _ = db::finalize_running_tool_activities(&conn, &request.turn_id, "failed");
+            }
+            return Err(crate::error::AppError::msg(format!(
+                "claude_proposal_failed: staged changes could not be finalized; {error}"
+            )));
+        }
+    };
     let citations = mcp_server.take_citations();
     if !citations.is_empty() {
         let _ = app.emit(
@@ -303,6 +316,48 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
         backend: ChatBackend::Claude,
         effective_model: result.model,
     })
+}
+
+pub fn compose_focus_prompt(query: &str, focus_paths: &[String], vault_root: &Path) -> String {
+    if focus_paths.is_empty() {
+        return query.to_string();
+    }
+    const MAX_FOCUS_FILES: usize = 16;
+    const MAX_FOCUS_CHARS_PER_FILE: usize = 6_000;
+    const MAX_FOCUS_CHARS_TOTAL: usize = 48_000;
+    let mut section = String::from("\n\n---\nExplicitly selected vault content:");
+    let mut total = 0usize;
+    for path in focus_paths.iter().take(MAX_FOCUS_FILES) {
+        if total >= MAX_FOCUS_CHARS_TOTAL {
+            section.push_str(&format!("\n[additional focus files omitted: {}]", path));
+            continue;
+        }
+        match vault::read_file(vault_root, path) {
+            Ok(content) => {
+                let clipped: String = content
+                    .chars()
+                    .take(MAX_FOCUS_CHARS_PER_FILE.min(MAX_FOCUS_CHARS_TOTAL - total))
+                    .collect();
+                let truncated = clipped.chars().count() < content.chars().count()
+                    && section.len() < total + MAX_FOCUS_CHARS_TOTAL;
+                section.push_str(&format!("\n\n### {path}\n{}", clipped));
+                if truncated {
+                    section.push_str("\n[truncated]");
+                }
+                total += clipped.chars().count();
+            }
+            Err(_) => {
+                section.push_str(&format!("\n\n### {path}\n[focus file could not be read]"));
+            }
+        }
+    }
+    if focus_paths.len() > MAX_FOCUS_FILES {
+        section.push_str(&format!(
+            "\n[{} additional focus files omitted]",
+            focus_paths.len() - MAX_FOCUS_FILES
+        ));
+    }
+    format!("{query}{section}")
 }
 
 pub fn tool_kind_for(name: &str) -> &'static str {

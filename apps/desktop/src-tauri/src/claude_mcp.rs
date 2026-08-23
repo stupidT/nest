@@ -104,10 +104,17 @@ impl McpServerState {
         turn_id: &str,
         mode: CapabilityMode,
         protected_paths: Vec<String>,
-    ) -> String {
+    ) -> Result<String, String> {
+        let mut active = self.active_turn.write();
+        if let Some(existing) = active.as_ref() {
+            return Err(format!(
+                "chat_turn_busy: another turn is already running (turn {})",
+                existing.turn_id
+            ));
+        }
         let credential = format!("nest_{}", uuid::Uuid::new_v4().simple());
         *self.credential.write() = Some(credential.clone());
-        *self.active_turn.write() = Some(ActiveTurn {
+        *active = Some(ActiveTurn {
             session_id: session_id.to_string(),
             turn_id: turn_id.to_string(),
             mode,
@@ -119,7 +126,7 @@ impl McpServerState {
             citations: RwLock::new(Vec::new()),
             tool_sequence: std::sync::atomic::AtomicI64::new(0),
         });
-        credential
+        Ok(credential)
     }
 
     pub fn end_turn(&self) {
@@ -128,6 +135,25 @@ impl McpServerState {
 
     pub fn turn_active(&self) -> bool {
         self.active_turn.read().is_some()
+    }
+
+    pub fn record_native_activity(&self, name: &str, target: Option<&str>) {
+        let turn = self.active_turn.read();
+        if let Some(active) = turn.as_ref() {
+            let sequence = active
+                .tool_sequence
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let conn = self.state.db.lock();
+            let _ = crate::db::insert_tool_activity(
+                &conn,
+                &active.turn_id,
+                sequence,
+                "claude_native",
+                crate::chat_runtime::tool_kind_for(name),
+                name,
+                target,
+            );
+        }
     }
 
     pub fn finish_staged(&self) -> crate::error::AppResult<Vec<crate::db::NewChatFileChange>> {
@@ -668,7 +694,9 @@ mod tests {
             .expect("request");
         assert_eq!(unauthorized.status(), 401);
 
-        let credential = server.begin_turn("s1", "t1", CapabilityMode::Ask, Vec::new());
+        let credential = server
+            .begin_turn("s1", "t1", CapabilityMode::Ask, Vec::new())
+            .expect("begin turn");
         let headers = [
             ("Authorization", format!("Bearer {credential}")),
             ("Host", "127.0.0.1".to_string()),

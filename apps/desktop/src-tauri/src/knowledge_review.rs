@@ -123,6 +123,7 @@ fn ensure_editable(state: &SharedState, path: &str) -> AppResult<()> {
             "Knowledge tools can only edit Markdown (.md) files",
         ));
     }
+    ensure_no_symlink_components(&state.vault_path(), path)?;
     let candidate = Path::new(path);
     let pack = {
         let conn = state.db.lock();
@@ -136,5 +137,40 @@ fn ensure_editable(state: &SharedState, path: &str) -> AppResult<()> {
             .ok_or_else(|| AppError::msg(format!("Path is not inside an active pack: {path}")))?
     };
     crate::commands::ensure_pack_not_review_locked(&pack)?;
+    let user = state
+        .hub_auth
+        .lock()
+        .as_ref()
+        .map(|session| session.user.clone());
+    let permitted = match pack.origin.as_str() {
+        "local" => true,
+        "registry" => user.as_ref().is_some_and(|user| {
+            user.role == "admin"
+                || user.role == "superuser"
+                || pack.owner_id.as_deref() == Some(user.id.as_str())
+        }),
+        _ => false,
+    };
+    if !permitted {
+        return Err(AppError::msg(format!(
+            "You do not have edit access to {}",
+            pack.name
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_no_symlink_components(root: &Path, rel_path: &str) -> AppResult<()> {
+    let mut probe = root.to_path_buf();
+    for component in Path::new(rel_path).components() {
+        probe.push(component);
+        if let Ok(metadata) = std::fs::symlink_metadata(&probe) {
+            if metadata.file_type().is_symlink() {
+                return Err(AppError::msg(
+                    "Knowledge tools cannot edit through symbolic links",
+                ));
+            }
+        }
+    }
     Ok(())
 }
