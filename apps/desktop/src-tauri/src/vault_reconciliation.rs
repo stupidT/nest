@@ -8,6 +8,7 @@ pub const WORKSPACE_HEALTH_KEY: &str = "workspace_health_v1";
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct WorkspaceHealth {
+    #[allow(dead_code)]
     pub reindex_required: bool,
     pub reason: Option<String>,
     pub updated_at: Option<String>,
@@ -43,6 +44,7 @@ pub fn set_reindex_required(state: &SharedState, reason: &str) -> AppResult<()> 
     save_health(state, &health)
 }
 
+#[allow(dead_code)]
 pub fn clear_reindex_required(state: &SharedState) -> AppResult<()> {
     let mut health = load_health(state);
     health.reindex_required = false;
@@ -52,9 +54,13 @@ pub fn clear_reindex_required(state: &SharedState) -> AppResult<()> {
 }
 
 pub struct ReconcileReport {
+    #[allow(dead_code)]
     pub rebased: usize,
+    #[allow(dead_code)]
     pub conflicted: usize,
+    #[allow(dead_code)]
     pub resolved_external: usize,
+    #[allow(dead_code)]
     pub reindex_required: bool,
 }
 
