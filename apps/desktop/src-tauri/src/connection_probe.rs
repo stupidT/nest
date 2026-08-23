@@ -30,6 +30,7 @@ pub async fn run_six_tool_probe(
 
 struct ProbeEnv {
     probe_session: String,
+    probe_turn_id: String,
     pack_dir: String,
     probe_path: String,
     challenge: String,
@@ -69,7 +70,7 @@ async fn run_claude_driven_probe(
         }
     };
 
-    let probe_session = format!("probe-{}", uuid::Uuid::new_v4());
+    let probe_session = uuid::Uuid::new_v4().to_string();
     let pack_dir = format!("__probe_{probe_session}");
     let pack_root = state.vault_path().join(&pack_dir);
     if let Err(error) = std::fs::create_dir_all(&pack_root) {
@@ -107,24 +108,57 @@ async fn run_claude_driven_probe(
 
     let probe_path = format!("{pack_dir}/probe.md");
     let challenge = format!("nest-probe-{}", uuid::Uuid::new_v4().simple());
-    let credential =
-        match server.begin_turn(&probe_session, "probe", CapabilityMode::Agent, Vec::new()) {
-            Ok(credential) => credential,
-            Err(error) => {
-                cleanup(&state, &pack_dir, handle.clone()).await;
-                return ProbeOutcome {
-                    tools_exercised: Vec::new(),
-                    failures: vec![error],
-                    cleanup_warnings: Vec::new(),
-                };
-            }
-        };
+    let probe_turn_id = uuid::Uuid::new_v4().to_string();
+    {
+        let conn = state.db.lock();
+        let _ = conn.execute(
+            "INSERT INTO chat_sessions (id, title, title_source, mode, created_at, updated_at)
+             VALUES (?1, 'Nest Connection Probe', 'placeholder', 'agent', ?2, ?2)",
+            rusqlite::params![probe_session, chrono::Utc::now().to_rfc3339()],
+        );
+        let _ = conn.execute(
+            "INSERT INTO chat_messages (id, session_id, role, content, citations_json, created_at)
+             VALUES (?1, ?2, 'user', 'probe', '', ?3)",
+            rusqlite::params![
+                uuid::Uuid::new_v4().to_string(),
+                probe_session,
+                chrono::Utc::now().to_rfc3339()
+            ],
+        );
+        let _ = conn.execute(
+            "INSERT INTO chat_turns (id, session_id, user_message_id, backend_id,
+                requested_model_kind, mode, selection_revision, status, started_at)
+             SELECT ?1, ?2, id, 'claude', 'default', 'agent', 0, 'running', ?3
+             FROM chat_messages WHERE session_id = ?2 ORDER BY created_at DESC LIMIT 1",
+            rusqlite::params![
+                probe_turn_id,
+                probe_session,
+                chrono::Utc::now().to_rfc3339()
+            ],
+        );
+    }
+    let credential = match server.begin_turn(
+        &probe_session,
+        &probe_turn_id,
+        CapabilityMode::Agent,
+        Vec::new(),
+    ) {
+        Ok(credential) => credential,
+        Err(error) => {
+            cleanup(&state, &pack_dir, &probe_session, "", handle.clone()).await;
+            return ProbeOutcome {
+                tools_exercised: Vec::new(),
+                failures: vec![error],
+                cleanup_warnings: Vec::new(),
+            };
+        }
+    };
     let config_path = std::env::temp_dir().join(format!(
         "nest-probe-mcp-{}.json",
         uuid::Uuid::new_v4().simple()
     ));
     if let Err(error) = std::fs::write(&config_path, handle.config_json(&credential)) {
-        cleanup(&state, &pack_dir, handle.clone()).await;
+        cleanup(&state, &pack_dir, &probe_session, "", handle.clone()).await;
         return ProbeOutcome {
             tools_exercised: Vec::new(),
             failures: vec![format!("probe mcp config write failed: {error}")],
@@ -134,6 +168,7 @@ async fn run_claude_driven_probe(
 
     let env = ProbeEnv {
         probe_session,
+        probe_turn_id,
         pack_dir,
         probe_path,
         challenge,
@@ -172,7 +207,14 @@ async fn run_claude_driven_probe(
     if let Err(error) = turn1 {
         server.end_turn();
         server.clear_event_sink();
-        let outcome = cleanup(&state, &env.pack_dir, handle.clone()).await;
+        let outcome = cleanup(
+            &state,
+            &env.pack_dir,
+            &env.probe_session,
+            &env.probe_turn_id,
+            handle.clone(),
+        )
+        .await;
         return ProbeOutcome {
             tools_exercised: Vec::new(),
             failures: vec![format!("probe turn 1 failed: {error}")],
@@ -219,7 +261,7 @@ async fn run_claude_driven_probe(
 
     let called = {
         let conn = state.db.lock();
-        crate::db::list_tool_activities(&conn, "probe")
+        crate::db::list_tool_activities(&conn, &env.probe_turn_id)
             .map(|rows| {
                 rows.into_iter()
                     .map(|row| (row.label, row.status))
@@ -281,7 +323,14 @@ async fn run_claude_driven_probe(
         ));
     }
 
-    let cleanup_warnings = cleanup(&state, &env.pack_dir, handle.clone()).await;
+    let cleanup_warnings = cleanup(
+        &state,
+        &env.pack_dir,
+        &env.probe_session,
+        &env.probe_turn_id,
+        handle.clone(),
+    )
+    .await;
 
     ProbeOutcome {
         tools_exercised,
@@ -297,6 +346,8 @@ fn never_cancel() -> crate::claude_cli::CancelToken {
 async fn cleanup(
     state: &SharedState,
     pack_dir: &str,
+    probe_session: &str,
+    probe_turn_id: &str,
     handle: crate::claude_mcp::McpServerHandle,
 ) -> Vec<String> {
     let mut warnings = Vec::new();
@@ -311,7 +362,11 @@ async fn cleanup(
         if let Err(error) = crate::db::purge_path_data(&conn, pack_dir) {
             warnings.push(format!("probe pack deregistration failed: {error}"));
         }
-        let _ = crate::db::finalize_running_tool_activities(&conn, "probe", "succeeded");
+        let _ = crate::db::finalize_running_tool_activities(&conn, probe_turn_id, "succeeded");
+        let _ = conn.execute(
+            "DELETE FROM chat_sessions WHERE id = ?1",
+            rusqlite::params![probe_session],
+        );
     }
     handle.stop().await;
     warnings

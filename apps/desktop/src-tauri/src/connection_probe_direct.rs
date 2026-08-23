@@ -24,7 +24,7 @@ pub async fn run_direct_probe(
         }
     };
 
-    let probe_session = format!("probe-{}", uuid::Uuid::new_v4());
+    let probe_session = uuid::Uuid::new_v4().to_string();
     let pack_dir = format!("__probe_{probe_session}");
     let pack_root = state.vault_path().join(&pack_dir);
     if let Err(error) = std::fs::create_dir_all(&pack_root) {
