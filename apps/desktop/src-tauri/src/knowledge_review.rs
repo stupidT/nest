@@ -12,11 +12,112 @@ pub const REVIEW_STATUS_APPROVED: &str = "approved";
 pub const REVIEW_STATUS_REJECTED: &str = "rejected";
 #[allow(dead_code)]
 pub const REVIEW_STATUS_FAILED: &str = "failed";
+pub const REVIEW_STATUS_CONFLICTED: &str = "conflicted";
 
 pub enum ReviewOutcome {
     Approved,
     Rejected,
+    RebasedReviewRequired,
+    Conflicted,
+    ResolvedExternal,
     Failed { code: String, message: String },
+}
+
+pub enum ReconcileOutcome {
+    Rebased,
+    Conflicted,
+    ResolvedExternal,
+    Unchanged,
+}
+
+fn content_hash(content: Option<&str>) -> String {
+    use std::fmt::Write as _;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(&content, &mut hasher);
+    let hash = std::hash::Hasher::finish(&hasher);
+    let mut out = String::with_capacity(16);
+    let _ = write!(&mut out, "{hash:016x}");
+    out
+}
+
+pub fn reconcile_pending_change(
+    state: &SharedState,
+    change: &db::ChatFileChangeDetail,
+) -> AppResult<ReconcileOutcome> {
+    let root = state.vault_path();
+    let current = vault::read_file(&root, &change.path).ok();
+    if current == change.old_content {
+        return Ok(ReconcileOutcome::Unchanged);
+    }
+    let old_hash = content_hash(change.old_content.as_deref());
+    let new_hash = content_hash(change.new_content.as_deref());
+    match (&change.old_content, &change.new_content, &current) {
+        (Some(old), Some(_), Some(disk)) => {
+            if disk == change.new_content.as_deref().unwrap() {
+                {
+                    let conn = state.db.lock();
+                    db::resolve_chat_file_change_externally(
+                        &conn,
+                        &change.id,
+                        "proposal already satisfied by external change",
+                    )?;
+                }
+                return Ok(ReconcileOutcome::ResolvedExternal);
+            }
+            let _ = old;
+            let base = change.old_content.as_deref().unwrap_or("");
+            let proposed = change.new_content.as_deref().unwrap_or("");
+            match crate::knowledge_merge::merge_text(base, proposed, disk) {
+                crate::knowledge_merge::MergeOutcome::Clean(merged) => {
+                    if merged == disk.as_str() {
+                        {
+                            let conn = state.db.lock();
+                            db::resolve_chat_file_change_externally(
+                                &conn,
+                                &change.id,
+                                "clean merge equals current disk content",
+                            )?;
+                        }
+                        return Ok(ReconcileOutcome::ResolvedExternal);
+                    }
+                    {
+                        let conn = state.db.lock();
+                        db::rebase_chat_file_change(
+                            &conn,
+                            &change.id,
+                            Some(disk),
+                            Some(&merged),
+                            &old_hash,
+                            &new_hash,
+                        )?;
+                    }
+                    Ok(ReconcileOutcome::Rebased)
+                }
+                crate::knowledge_merge::MergeOutcome::Conflicted => {
+                    {
+                        let conn = state.db.lock();
+                        db::conflict_chat_file_change(
+                            &conn,
+                            &change.id,
+                            "overlapping edits conflict with external changes",
+                        )?;
+                    }
+                    Ok(ReconcileOutcome::Conflicted)
+                }
+            }
+        }
+        _ => {
+            {
+                let conn = state.db.lock();
+                db::conflict_chat_file_change(
+                    &conn,
+                    &change.id,
+                    "create/delete proposal cannot be auto-merged with external change",
+                )?;
+            }
+            Ok(ReconcileOutcome::Conflicted)
+        }
+    }
 }
 
 pub struct KnowledgeReview;
@@ -26,6 +127,10 @@ impl KnowledgeReview {
         let change = {
             let conn = state.db.lock();
             let change = db::get_chat_file_change(&conn, change_id)?;
+            if change.status == REVIEW_STATUS_CONFLICTED && !approve {
+                db::set_chat_file_change_status(&conn, change_id, REVIEW_STATUS_REJECTED)?;
+                return Ok(ReviewOutcome::Rejected);
+            }
             if change.status != REVIEW_STATUS_PENDING {
                 return Err(AppError::msg("File change is no longer pending"));
             }
@@ -33,16 +138,40 @@ impl KnowledgeReview {
                 db::set_chat_file_change_status(&conn, change_id, REVIEW_STATUS_REJECTED)?;
                 return Ok(ReviewOutcome::Rejected);
             }
-            let claim_id = uuid::Uuid::new_v4().to_string();
-            db::claim_chat_file_change(&conn, change_id, &claim_id)?;
             change
         };
+
+        match reconcile_pending_change(state, &change)? {
+            ReconcileOutcome::Unchanged => {}
+            ReconcileOutcome::Rebased => {
+                return Ok(ReviewOutcome::RebasedReviewRequired);
+            }
+            ReconcileOutcome::Conflicted => {
+                return Ok(ReviewOutcome::Conflicted);
+            }
+            ReconcileOutcome::ResolvedExternal => {
+                return Ok(ReviewOutcome::ResolvedExternal);
+            }
+        }
+
+        let change = {
+            let conn = state.db.lock();
+            db::get_chat_file_change(&conn, change_id)?
+        };
+        if change.status != REVIEW_STATUS_PENDING {
+            return Ok(ReviewOutcome::Conflicted);
+        }
+        let claim_id = uuid::Uuid::new_v4().to_string();
+        {
+            let conn = state.db.lock();
+            db::claim_chat_file_change(&conn, change_id, &claim_id)?;
+        }
 
         let applied = Self::apply_change(state, &change);
         let result = {
             let conn = state.db.lock();
             match &applied {
-                Ok(()) => db::set_chat_file_change_status(&conn, change_id, REVIEW_STATUS_APPROVED),
+                Ok(()) => db::approve_chat_file_change(&conn, change_id),
                 Err(error) => {
                     db::fail_chat_file_change(&conn, change_id, "apply_failed", &error.to_string())
                 }
@@ -173,4 +302,208 @@ fn ensure_no_symlink_components(root: &Path, rel_path: &str) -> AppResult<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod reconcile_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    struct Env {
+        state: SharedState,
+        _root: std::path::PathBuf,
+    }
+
+    fn setup(pack: &str, file: &str, content: &str) -> Env {
+        let state = Arc::new(
+            crate::state::AppState::new(
+                std::env::temp_dir().join(format!("nest-reconcile-{}", uuid::Uuid::new_v4())),
+            )
+            .unwrap(),
+        );
+        let vault = state.vault_path();
+        std::fs::create_dir_all(vault.join(pack)).unwrap();
+        std::fs::write(vault.join(pack).join(file), content).unwrap();
+        {
+            let conn = state.db.lock();
+            db::upsert_sync_state(
+                &conn,
+                db::SyncStateUpsert {
+                    pack_id: pack,
+                    name: pack,
+                    version: "1.0.0",
+                    local_path: pack,
+                    origin: "local",
+                    owner_id: None,
+                    description: "",
+                    patch_revision: 0,
+                },
+            )
+            .unwrap();
+        }
+        Env {
+            state,
+            _root: vault,
+        }
+    }
+
+    fn insert_pending(env: &Env, path: &str, old: Option<&str>, new: Option<&str>) -> String {
+        let conn = env.state.db.lock();
+        let session_id = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO chat_sessions (id, title, title_source, mode, created_at, updated_at)
+             VALUES (?1, 't', 'placeholder', 'ask', '2026-01-01', '2026-01-01')",
+            rusqlite::params![session_id],
+        )
+        .unwrap();
+        let message_id = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO chat_messages (id, session_id, role, content, citations_json, created_at)
+             VALUES (?1, ?2, 'assistant', 'm', '', '2026-01-01')",
+            rusqlite::params![message_id, session_id],
+        )
+        .unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO chat_file_changes (id, message_id, path, operation, status, old_content, new_content)
+             VALUES (?1, ?2, ?3, 'modified', 'pending', ?4, ?5)",
+            rusqlite::params![id, message_id, path, old, new],
+        )
+        .unwrap();
+        id
+    }
+
+    fn current_change(env: &Env, id: &str) -> db::ChatFileChangeDetail {
+        let conn = env.state.db.lock();
+        db::get_chat_file_change(&conn, id).unwrap()
+    }
+
+    #[test]
+    fn unchanged_baseline_returns_unchanged() {
+        let env = setup("p", "a.md", "one\ntwo\nthree");
+        let id = insert_pending(
+            &env,
+            "p/a.md",
+            Some("one\ntwo\nthree"),
+            Some("X\ntwo\nthree"),
+        );
+        let change = current_change(&env, &id);
+        assert!(matches!(
+            reconcile_pending_change(&env.state, &change).unwrap(),
+            ReconcileOutcome::Unchanged
+        ));
+    }
+
+    #[test]
+    fn independent_external_edit_rebases_onto_disk() {
+        let env = setup("p", "a.md", "one\ntwo\nthree");
+        let id = insert_pending(
+            &env,
+            "p/a.md",
+            Some("one\ntwo\nthree"),
+            Some("ONE\ntwo\nthree"),
+        );
+        std::fs::write(env.state.vault_path().join("p/a.md"), "one\ntwo\nTHREE").unwrap();
+        let change = current_change(&env, &id);
+        assert!(matches!(
+            reconcile_pending_change(&env.state, &change).unwrap(),
+            ReconcileOutcome::Rebased
+        ));
+        let rebased = current_change(&env, &id);
+        assert_eq!(rebased.status, "pending");
+        assert_eq!(rebased.old_content.as_deref(), Some("one\ntwo\nTHREE"));
+        assert_eq!(rebased.new_content.as_deref(), Some("ONE\ntwo\nTHREE"));
+        assert_eq!(rebased.rebase_count, 1);
+        assert!(rebased.last_rebased_at.is_some());
+    }
+
+    #[test]
+    fn already_satisfied_proposal_resolves_external() {
+        let env = setup("p", "a.md", "one\ntwo\nthree");
+        let id = insert_pending(
+            &env,
+            "p/a.md",
+            Some("one\ntwo\nthree"),
+            Some("one\ntwo\nNEW"),
+        );
+        std::fs::write(env.state.vault_path().join("p/a.md"), "one\ntwo\nNEW").unwrap();
+        let change = current_change(&env, &id);
+        assert!(matches!(
+            reconcile_pending_change(&env.state, &change).unwrap(),
+            ReconcileOutcome::ResolvedExternal
+        ));
+        let resolved = current_change(&env, &id);
+        assert_eq!(resolved.status, "resolved_external");
+        assert!(resolved.resolution_reason.is_some());
+    }
+
+    #[test]
+    fn overlapping_external_edit_conflicts() {
+        let env = setup("p", "a.md", "one\ntwo\nthree");
+        let id = insert_pending(
+            &env,
+            "p/a.md",
+            Some("one\ntwo\nthree"),
+            Some("one\nCHANGED\nthree"),
+        );
+        std::fs::write(env.state.vault_path().join("p/a.md"), "one\nOTHER\nthree").unwrap();
+        let change = current_change(&env, &id);
+        assert!(matches!(
+            reconcile_pending_change(&env.state, &change).unwrap(),
+            ReconcileOutcome::Conflicted
+        ));
+        let conflicted = current_change(&env, &id);
+        assert_eq!(conflicted.status, "conflicted");
+    }
+
+    #[test]
+    fn conflicted_proposal_can_only_be_rejected() {
+        let env = setup("p", "a.md", "one\ntwo\nthree");
+        let id = insert_pending(
+            &env,
+            "p/a.md",
+            Some("one\ntwo\nthree"),
+            Some("one\nCHANGED\nthree"),
+        );
+        std::fs::write(env.state.vault_path().join("p/a.md"), "one\nOTHER\nthree").unwrap();
+        assert!(
+            matches!(
+                KnowledgeReview::review(&env.state, &id, true).unwrap(),
+                ReviewOutcome::Conflicted
+            ),
+            "approving after an overlapping external change must conflict, not apply"
+        );
+        assert!(
+            matches!(KnowledgeReview::review(&env.state, &id, true), Err(_)),
+            "approving a conflicted proposal must fail outright"
+        );
+        assert!(matches!(
+            KnowledgeReview::review(&env.state, &id, false).unwrap(),
+            ReviewOutcome::Rejected
+        ));
+        let rejected = current_change(&env, &id);
+        assert_eq!(rejected.status, "rejected");
+    }
+
+    #[test]
+    fn rebase_on_approve_requires_second_review() {
+        let env = setup("p", "a.md", "one\ntwo\nthree");
+        let id = insert_pending(
+            &env,
+            "p/a.md",
+            Some("one\ntwo\nthree"),
+            Some("ONE\ntwo\nthree"),
+        );
+        std::fs::write(env.state.vault_path().join("p/a.md"), "one\ntwo\nTHREE").unwrap();
+        assert!(matches!(
+            KnowledgeReview::review(&env.state, &id, true).unwrap(),
+            ReviewOutcome::RebasedReviewRequired
+        ));
+        let rebased = current_change(&env, &id);
+        assert_eq!(rebased.status, "pending", "rebased proposal stays pending");
+        assert!(matches!(
+            KnowledgeReview::review(&env.state, &id, true).unwrap(),
+            ReviewOutcome::Approved
+        ));
+    }
 }

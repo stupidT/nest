@@ -395,13 +395,29 @@ impl KnowledgeWorkspace {
                 .ok_or_else(|| AppError::msg(format!("{path} is staged for deletion")));
         }
         self.installed_pack_for_path(path)?;
-        if let Some(pending) = {
+        let pending = {
             let conn = self.state.db.lock();
             db::get_pending_chat_file_change_for_path(&conn, path)?
-        } {
-            return pending
-                .new_content
-                .ok_or_else(|| AppError::msg(format!("{path} is pending deletion")));
+        };
+        if let Some(pending) = pending {
+            let disk = vault::read_file(&self.state.vault_path(), path).ok();
+            if disk == pending.old_content {
+                return pending
+                    .new_content
+                    .ok_or_else(|| AppError::msg(format!("{path} is pending deletion")));
+            }
+            match crate::knowledge_review::reconcile_pending_change(&self.state, &pending) {
+                Ok(crate::knowledge_review::ReconcileOutcome::Rebased) => {
+                    let conn = self.state.db.lock();
+                    let rebased = db::get_pending_chat_file_change_for_path(&conn, path)?;
+                    if let Some(rebased) = rebased {
+                        return rebased
+                            .new_content
+                            .ok_or_else(|| AppError::msg(format!("{path} is pending deletion")));
+                    }
+                }
+                _ => {}
+            }
         }
         vault::read_file(&self.state.vault_path(), path)
     }
@@ -430,17 +446,23 @@ impl KnowledgeWorkspace {
         }
         let vault_root = self.state.vault_path();
         let disk_original = vault::read_file(&vault_root, &path).ok();
-        let pending = {
+        let mut pending = {
             let conn = self.state.db.lock();
             db::get_pending_chat_file_change_for_path(&conn, &path)
                 .map_err(|error| KnowledgeError::new("internal", error.to_string()))?
         };
-        if let Some(pending) = &pending {
-            if pending.old_content != disk_original {
-                return Err(KnowledgeError::new(
-                    ERR_CONFLICT,
-                    format!("{path} changed after its pending proposal was created"),
-                ));
+        if let Some(existing) = &pending {
+            if existing.old_content != disk_original {
+                match crate::knowledge_review::reconcile_pending_change(&self.state, existing) {
+                    Ok(crate::knowledge_review::ReconcileOutcome::Rebased) => {
+                        let conn = self.state.db.lock();
+                        pending = db::get_pending_chat_file_change_for_path(&conn, &path)
+                            .map_err(|error| KnowledgeError::new("internal", error.to_string()))?;
+                    }
+                    Ok(_) | Err(_) => {
+                        pending = None;
+                    }
+                }
             }
         }
         let previous = self.staged.get(&path).cloned();

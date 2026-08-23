@@ -354,6 +354,12 @@ pub struct ChatFileChangeDetail {
     pub status: String,
     pub old_content: Option<String>,
     pub new_content: Option<String>,
+    #[serde(default)]
+    pub rebase_count: i64,
+    #[serde(default)]
+    pub last_rebased_at: Option<String>,
+    #[serde(default)]
+    pub resolution_reason: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -595,6 +601,28 @@ fn ensure_chat_file_change_columns(conn: &Connection) -> AppResult<()> {
         )?;
         conn.execute(
             "ALTER TABLE chat_file_changes ADD COLUMN failure_message TEXT",
+            [],
+        )?;
+    }
+    if !table_has_column(conn, "chat_file_changes", "rebase_count")? {
+        conn.execute(
+            "ALTER TABLE chat_file_changes ADD COLUMN rebase_count INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+        conn.execute(
+            "ALTER TABLE chat_file_changes ADD COLUMN last_rebased_at TEXT",
+            [],
+        )?;
+        conn.execute(
+            "ALTER TABLE chat_file_changes ADD COLUMN rebased_from_old_hash TEXT",
+            [],
+        )?;
+        conn.execute(
+            "ALTER TABLE chat_file_changes ADD COLUMN rebased_from_new_hash TEXT",
+            [],
+        )?;
+        conn.execute(
+            "ALTER TABLE chat_file_changes ADD COLUMN resolution_reason TEXT",
             [],
         )?;
     }
@@ -2093,7 +2121,7 @@ fn list_file_change_summaries(
 
 pub fn get_chat_file_change(conn: &Connection, change_id: &str) -> AppResult<ChatFileChangeDetail> {
     conn.query_row(
-        "SELECT id, path, operation, status, old_content, new_content FROM chat_file_changes WHERE id = ?1",
+        "SELECT id, path, operation, status, old_content, new_content, rebase_count, last_rebased_at, resolution_reason FROM chat_file_changes WHERE id = ?1",
         params![change_id],
         |row| {
             Ok(ChatFileChangeDetail {
@@ -2103,6 +2131,9 @@ pub fn get_chat_file_change(conn: &Connection, change_id: &str) -> AppResult<Cha
                 status: row.get(3)?,
                 old_content: row.get(4)?,
                 new_content: row.get(5)?,
+                rebase_count: row.get(6)?,
+                last_rebased_at: row.get(7)?,
+                resolution_reason: row.get(8)?,
             })
         },
     )
@@ -2114,7 +2145,7 @@ pub fn get_pending_chat_file_change_for_path(
     path: &str,
 ) -> AppResult<Option<ChatFileChangeDetail>> {
     conn.query_row(
-        "SELECT id, path, operation, status, old_content, new_content
+        "SELECT id, path, operation, status, old_content, new_content, rebase_count, last_rebased_at, resolution_reason
          FROM chat_file_changes
          WHERE path = ?1 AND status = 'pending'
          ORDER BY rowid DESC LIMIT 1",
@@ -2127,6 +2158,9 @@ pub fn get_pending_chat_file_change_for_path(
                 status: row.get(3)?,
                 old_content: row.get(4)?,
                 new_content: row.get(5)?,
+                rebase_count: row.get(6)?,
+                last_rebased_at: row.get(7)?,
+                resolution_reason: row.get(8)?,
             })
         },
     )
@@ -2136,7 +2170,7 @@ pub fn get_pending_chat_file_change_for_path(
 
 pub fn list_pending_chat_file_changes(conn: &Connection) -> AppResult<Vec<ChatFileChangeDetail>> {
     let mut stmt = conn.prepare(
-        "SELECT id, path, operation, status, old_content, new_content
+        "SELECT id, path, operation, status, old_content, new_content, rebase_count, last_rebased_at, resolution_reason
          FROM chat_file_changes WHERE status = 'pending' ORDER BY rowid",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -2147,9 +2181,25 @@ pub fn list_pending_chat_file_changes(conn: &Connection) -> AppResult<Vec<ChatFi
             status: row.get(3)?,
             old_content: row.get(4)?,
             new_content: row.get(5)?,
+            rebase_count: row.get(6)?,
+            last_rebased_at: row.get(7)?,
+            resolution_reason: row.get(8)?,
         })
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+pub fn approve_chat_file_change(conn: &Connection, change_id: &str) -> AppResult<()> {
+    let changed = conn.execute(
+        "UPDATE chat_file_changes SET status = 'approved' WHERE id = ?1 AND status = 'applying'",
+        params![change_id],
+    )?;
+    if changed == 0 {
+        return Err(crate::error::AppError::msg(
+            "File change is no longer pending",
+        ));
+    }
+    Ok(())
 }
 
 pub fn set_chat_file_change_status(
@@ -2161,7 +2211,8 @@ pub fn set_chat_file_change_status(
         return Err(crate::error::AppError::msg("Invalid file-change status"));
     }
     let changed = conn.execute(
-        "UPDATE chat_file_changes SET status = ?1 WHERE id = ?2 AND status = 'pending'",
+        "UPDATE chat_file_changes SET status = ?1
+         WHERE id = ?2 AND (status = 'pending' OR (status = 'conflicted' AND ?1 = 'rejected'))",
         params![status, change_id],
     )?;
     if changed == 0 {
@@ -2184,6 +2235,62 @@ pub fn claim_chat_file_change(conn: &Connection, change_id: &str, claim_id: &str
             "File change is no longer pending",
         ));
     }
+    Ok(())
+}
+
+pub fn rebase_chat_file_change(
+    conn: &Connection,
+    change_id: &str,
+    new_old_content: Option<&str>,
+    new_new_content: Option<&str>,
+    old_hash: &str,
+    new_hash: &str,
+) -> AppResult<()> {
+    conn.execute(
+        "UPDATE chat_file_changes
+         SET old_content = ?1, new_content = ?2,
+             rebase_count = rebase_count + 1,
+             last_rebased_at = ?3,
+             rebased_from_old_hash = ?4,
+             rebased_from_new_hash = ?5
+         WHERE id = ?6 AND status = 'pending'",
+        params![
+            new_old_content,
+            new_new_content,
+            Utc::now().to_rfc3339(),
+            old_hash,
+            new_hash,
+            change_id
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn resolve_chat_file_change_externally(
+    conn: &Connection,
+    change_id: &str,
+    reason: &str,
+) -> AppResult<()> {
+    conn.execute(
+        "UPDATE chat_file_changes
+         SET status = 'resolved_external', resolution_reason = ?1
+         WHERE id = ?2 AND status = 'pending'",
+        params![reason, change_id],
+    )?;
+    Ok(())
+}
+
+pub fn conflict_chat_file_change(
+    conn: &Connection,
+    change_id: &str,
+    reason: &str,
+) -> AppResult<()> {
+    conn.execute(
+        "UPDATE chat_file_changes
+         SET status = 'conflicted', resolution_reason = ?1
+         WHERE id = ?2 AND status = 'pending'",
+        params![reason, change_id],
+    )?;
     Ok(())
 }
 

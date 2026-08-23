@@ -123,11 +123,21 @@ pub fn chat_review_file_change(
     change_id: String,
     approve: bool,
 ) -> AppResult<()> {
+    use crate::knowledge_review::ReviewOutcome;
     match crate::knowledge_review::KnowledgeReview::review(&state, &change_id, approve)? {
-        crate::knowledge_review::ReviewOutcome::Approved => Ok(()),
-        crate::knowledge_review::ReviewOutcome::Rejected => Ok(()),
-        crate::knowledge_review::ReviewOutcome::Failed { code, message } => {
+        ReviewOutcome::Approved => Ok(()),
+        ReviewOutcome::Rejected => Ok(()),
+        ReviewOutcome::ResolvedExternal => Ok(()),
+        ReviewOutcome::RebasedReviewRequired => {
             let _ = app;
+            Err(crate::error::AppError::msg(
+                "proposal_rebased_review_required: the file changed externally; the proposal was rebased onto the current content. Review the new diff and approve again.",
+            ))
+        }
+        ReviewOutcome::Conflicted => Err(crate::error::AppError::msg(
+            "proposal_conflicted: the file changed externally in an overlapping way. Reject this proposal or start a new agent turn.",
+        )),
+        ReviewOutcome::Failed { code, message } => {
             Err(crate::error::AppError::msg(format!("{code}: {message}")))
         }
     }
