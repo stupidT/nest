@@ -167,17 +167,6 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
                 return;
             }
             if name.starts_with("mcp__nest__") {
-                let sequence = tool_sequence.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                let conn = state_for_tools.db.lock();
-                let _ = db::insert_tool_activity(
-                    &conn,
-                    &turn_id_for_tools,
-                    sequence,
-                    "nest_mcp",
-                    tool_kind_for(name),
-                    name,
-                    target,
-                );
                 return;
             }
             let _ = app_tool.emit(
@@ -214,9 +203,10 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
         let runtime = mcp
             .as_ref()
             .ok_or_else(|| crate::error::AppError::msg("nest_mcp_unavailable"))?;
-        let credential = runtime
-            .server
-            .begin_turn(&session_id, chat_mode, Vec::new());
+        let credential =
+            runtime
+                .server
+                .begin_turn(&session_id, &request.turn_id, chat_mode, Vec::new());
         let sink_app = app.clone();
         let sink_event = stream_event.clone();
         runtime
@@ -315,7 +305,7 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
     })
 }
 
-fn tool_kind_for(name: &str) -> &'static str {
+pub fn tool_kind_for(name: &str) -> &'static str {
     match name.trim_start_matches("mcp__nest__") {
         "knowledge_search" => "knowledge_search",
         "knowledge_list" => "knowledge_list",

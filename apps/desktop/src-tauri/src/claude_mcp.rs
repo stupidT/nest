@@ -24,9 +24,11 @@ const SESSION_HEADER: &str = "mcp-session-id";
 
 pub struct ActiveTurn {
     pub session_id: String,
+    pub turn_id: String,
     pub mode: CapabilityMode,
     pub workspace: RwLock<KnowledgeWorkspace>,
     pub citations: RwLock<Vec<crate::db::Citation>>,
+    pub tool_sequence: std::sync::atomic::AtomicI64,
 }
 
 pub type ToolEventSink = Box<dyn Fn(&str, Option<&str>, bool) + Send + Sync>;
@@ -99,6 +101,7 @@ impl McpServerState {
     pub fn begin_turn(
         &self,
         session_id: &str,
+        turn_id: &str,
         mode: CapabilityMode,
         protected_paths: Vec<String>,
     ) -> String {
@@ -106,6 +109,7 @@ impl McpServerState {
         *self.credential.write() = Some(credential.clone());
         *self.active_turn.write() = Some(ActiveTurn {
             session_id: session_id.to_string(),
+            turn_id: turn_id.to_string(),
             mode,
             workspace: RwLock::new(KnowledgeWorkspace::open_turn(
                 self.state.clone(),
@@ -113,6 +117,7 @@ impl McpServerState {
                 protected_paths,
             )),
             citations: RwLock::new(Vec::new()),
+            tool_sequence: std::sync::atomic::AtomicI64::new(0),
         });
         credential
     }
@@ -444,6 +449,27 @@ async fn call_tool(
         .map(|value| value.chars().take(48).collect::<String>());
     server.emit_tool_event(name, target.as_deref(), false);
     let result = call_tool_inner(server, name, args).await;
+    let status = if result.is_ok() {
+        "succeeded"
+    } else {
+        "failed"
+    };
+    if let Some(turn) = server.active_turn.read().as_ref() {
+        let sequence = turn
+            .tool_sequence
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let conn = server.state.db.lock();
+        let _ = crate::db::insert_tool_activity(
+            &conn,
+            &turn.turn_id,
+            sequence,
+            "nest_mcp",
+            crate::chat_runtime::tool_kind_for(name),
+            name,
+            target.as_deref(),
+        );
+        let _ = crate::db::finish_tool_activity(&conn, &turn.turn_id, sequence, status);
+    }
     server.emit_tool_event(name, target.as_deref(), true);
     result
 }
@@ -642,7 +668,7 @@ mod tests {
             .expect("request");
         assert_eq!(unauthorized.status(), 401);
 
-        let credential = server.begin_turn("s1", CapabilityMode::Ask, Vec::new());
+        let credential = server.begin_turn("s1", "t1", CapabilityMode::Ask, Vec::new());
         let headers = [
             ("Authorization", format!("Bearer {credential}")),
             ("Host", "127.0.0.1".to_string()),
