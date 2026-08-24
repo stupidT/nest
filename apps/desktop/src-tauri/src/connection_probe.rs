@@ -324,6 +324,7 @@ async fn run_claude_driven_probe(
             "knowledge_replace",
         ],
         &env.probe_path,
+        &env.challenge,
         &format!("{}-v2", env.challenge),
         &mut failures,
     );
@@ -482,6 +483,7 @@ async fn run_claude_driven_probe(
         &observations2,
         &["knowledge_search", "knowledge_read", "knowledge_delete"],
         &env.probe_path,
+        &format!("{}-v2", env.challenge),
         &format!("{}-v2", env.challenge),
         &mut failures,
     );
@@ -654,7 +656,8 @@ fn validate_observations(
     observations: &[crate::claude_mcp::ToolObservation],
     expected: &[&str],
     path: &str,
-    marker: &str,
+    read_marker: &str,
+    search_marker: &str,
     failures: &mut Vec<String>,
 ) {
     let names = observations
@@ -677,8 +680,8 @@ fn validate_observations(
             "knowledge_replace" => item.output.contains("Staged replace"),
             "knowledge_delete" => item.output.contains("Staged delete"),
             "knowledge_list" => item.output.contains(path),
-            "knowledge_read" => item.output.contains(marker),
-            "knowledge_search" => item.output.contains(path) && item.output.contains(marker),
+            "knowledge_read" => item.output.contains(read_marker),
+            "knowledge_search" => item.output.contains(path) && item.output.contains(search_marker),
             _ => false,
         };
         if !semantic_ok {
@@ -802,6 +805,7 @@ mod tests {
             &["knowledge_search", "knowledge_read"],
             "pack/probe.md",
             "token",
+            "token",
             &mut failures,
         );
         assert_eq!(failures.len(), 1);
@@ -830,6 +834,52 @@ mod tests {
             &["knowledge_search", "knowledge_read"],
             "pack/probe.md",
             "token",
+            "token",
+            &mut failures,
+        );
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    #[test]
+    fn turn_one_validation_accepts_read_before_replace() {
+        let observations = vec![
+            crate::claude_mcp::ToolObservation {
+                name: "knowledge_create".to_string(),
+                target: Some("pack/probe.md".to_string()),
+                succeeded: true,
+                output: "Staged create: pack/probe.md".to_string(),
+            },
+            crate::claude_mcp::ToolObservation {
+                name: "knowledge_list".to_string(),
+                target: Some("pack".to_string()),
+                succeeded: true,
+                output: r#"{"files":["pack/probe.md"]}"#.to_string(),
+            },
+            crate::claude_mcp::ToolObservation {
+                name: "knowledge_read".to_string(),
+                target: Some("pack/probe.md".to_string()),
+                succeeded: true,
+                output: "# Probe\n\nmarker".to_string(),
+            },
+            crate::claude_mcp::ToolObservation {
+                name: "knowledge_replace".to_string(),
+                target: Some("pack/probe.md".to_string()),
+                succeeded: true,
+                output: "Staged replace: pack/probe.md".to_string(),
+            },
+        ];
+        let mut failures = Vec::new();
+        validate_observations(
+            &observations,
+            &[
+                "knowledge_create",
+                "knowledge_list",
+                "knowledge_read",
+                "knowledge_replace",
+            ],
+            "pack/probe.md",
+            "marker",
+            "marker-v2",
             &mut failures,
         );
         assert!(failures.is_empty(), "{failures:?}");
