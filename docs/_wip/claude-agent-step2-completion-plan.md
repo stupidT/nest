@@ -21,7 +21,7 @@
 - [x] Proposal claim、apply journal 与启动恢复
 - [x] 完整 Claude 两轮六工具 connection probe
 - [x] Backend Descriptor、Knowledge effective view 与 app-wide operation slot
-- [ ] 全量回归、Windows 手工验收与 Step 2 最终收口
+- [x] 全量回归、Windows 手工验收与 Step 2 最终收口
 
 ## 2. P0：Vault Reconciliation 与 Reindex 闭环
 
@@ -174,7 +174,7 @@ Step 2 完成时必须同时满足：
 - [x] Desktop Rust：fmt、clippy（warnings as errors）、266 个测试（2026-08-24）
 - [x] `git diff --check` 与 `graphify update .`（2026-08-24；graphify 对合法 dynamic-import type 保留 1 条已知 TSX parser warning）
 - [x] 正式用户文档、开发文档和根 README 与实现一致
-- [ ] clean branch 仅包含 production code、tests 和正式 docs，不包含 `docs/_wip/**`
+- [x] clean branch `feat/claude-agent-clean`（`a8bfa8e`）仅包含 production code、tests 和正式 docs，不包含 `docs/_wip/**`
 
 ### 10.2 Windows live acceptance
 
