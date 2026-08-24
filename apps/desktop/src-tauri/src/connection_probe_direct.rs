@@ -17,9 +17,8 @@ pub async fn run_direct_probe(
         Ok(handle) => handle,
         Err(error) => {
             return ProbeOutcome {
-                tools_exercised: Vec::new(),
                 failures: vec![format!("mcp server start failed: {error}")],
-                cleanup_warnings: Vec::new(),
+                ..Default::default()
             };
         }
     };
@@ -30,9 +29,8 @@ pub async fn run_direct_probe(
     if let Err(error) = std::fs::create_dir_all(&pack_root) {
         let _ = handle.stop().await;
         return ProbeOutcome {
-            tools_exercised: Vec::new(),
             failures: vec![format!("probe pack creation failed: {error}")],
-            cleanup_warnings: Vec::new(),
+            ..Default::default()
         };
     }
     let registration = {
@@ -54,9 +52,8 @@ pub async fn run_direct_probe(
     if let Err(error) = registration {
         let _ = handle.stop().await;
         return ProbeOutcome {
-            tools_exercised: Vec::new(),
             failures: vec![format!("probe pack registration failed: {error}")],
-            cleanup_warnings: Vec::new(),
+            ..Default::default()
         };
     }
     let create_path = format!("{pack_dir}/probe.md");
@@ -72,9 +69,8 @@ pub async fn run_direct_probe(
                 }
                 handle.stop().await;
                 return ProbeOutcome {
-                    tools_exercised: Vec::new(),
                     failures: vec![error],
-                    cleanup_warnings: Vec::new(),
+                    ..Default::default()
                 };
             }
         };
@@ -265,6 +261,7 @@ pub async fn run_direct_probe(
         tools_exercised,
         failures,
         cleanup_warnings,
+        ..Default::default()
     }
 }
 

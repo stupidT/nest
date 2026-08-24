@@ -4,11 +4,13 @@ use crate::state::SharedState;
 use std::path::PathBuf;
 use std::time::Duration;
 
+#[derive(Default)]
 pub struct ProbeOutcome {
     #[allow(dead_code)]
     pub tools_exercised: Vec<String>,
     pub failures: Vec<String>,
     pub cleanup_warnings: Vec<String>,
+    pub effective_model: String,
 }
 
 pub type SinkBuilder = Box<dyn FnOnce() -> ToolEventSink + Send>;
@@ -84,9 +86,8 @@ async fn run_claude_driven_probe(
             Ok(detections) if !detections.is_empty() => detections,
             _ => {
                 return ProbeOutcome {
-                    tools_exercised: Vec::new(),
                     failures: vec!["invalid_cli_path: CLI not found for probe".to_string()],
-                    cleanup_warnings: Vec::new(),
+                    ..Default::default()
                 };
             }
         };
@@ -101,9 +102,8 @@ async fn run_claude_driven_probe(
         Ok(handle) => handle,
         Err(error) => {
             return ProbeOutcome {
-                tools_exercised: Vec::new(),
                 failures: vec![format!("mcp server start failed: {error}")],
-                cleanup_warnings: Vec::new(),
+                ..Default::default()
             };
         }
     };
@@ -114,9 +114,8 @@ async fn run_claude_driven_probe(
     if let Err(error) = std::fs::create_dir_all(&pack_root) {
         let _ = handle.stop().await;
         return ProbeOutcome {
-            tools_exercised: Vec::new(),
             failures: vec![format!("probe pack creation failed: {error}")],
-            cleanup_warnings: Vec::new(),
+            ..Default::default()
         };
     }
     let registration = {
@@ -139,9 +138,8 @@ async fn run_claude_driven_probe(
         let _ = std::fs::remove_dir_all(&pack_root);
         let _ = handle.stop().await;
         return ProbeOutcome {
-            tools_exercised: Vec::new(),
             failures: vec![format!("probe pack registration failed: {error}")],
-            cleanup_warnings: Vec::new(),
+            ..Default::default()
         };
     }
 
@@ -186,9 +184,8 @@ async fn run_claude_driven_probe(
         Err(error) => {
             cleanup(&state, &pack_dir, &probe_session, "", handle.clone()).await;
             return ProbeOutcome {
-                tools_exercised: Vec::new(),
                 failures: vec![error],
-                cleanup_warnings: Vec::new(),
+                ..Default::default()
             };
         }
     };
@@ -197,9 +194,8 @@ async fn run_claude_driven_probe(
         Err(error) => {
             cleanup(&state, &pack_dir, &probe_session, "", handle.clone()).await;
             return ProbeOutcome {
-                tools_exercised: Vec::new(),
                 failures: vec![format!("probe mcp config write failed: {error}")],
-                cleanup_warnings: Vec::new(),
+                ..Default::default()
             };
         }
     };
@@ -264,9 +260,9 @@ async fn run_claude_driven_probe(
                 cleanup_warnings.push(format!("probe config cleanup failed: {error}"));
             }
             return ProbeOutcome {
-                tools_exercised: Vec::new(),
                 failures: vec!["probe turn 1 timed out".to_string()],
                 cleanup_warnings,
+                ..Default::default()
             };
         }
     };
@@ -285,13 +281,18 @@ async fn run_claude_driven_probe(
             outcome.push(format!("probe config cleanup failed: {error}"));
         }
         return ProbeOutcome {
-            tools_exercised: Vec::new(),
             failures: vec![format!("probe turn 1 failed: {error}")],
             cleanup_warnings: outcome,
+            ..Default::default()
         };
     }
 
     let mut failures = Vec::new();
+
+    let mut effective_model = turn1
+        .ok()
+        .and_then(|result| result.model)
+        .unwrap_or_default();
 
     let observations1 = server.take_tool_observations();
     let staged1 = match server.finish_staged() {
@@ -397,9 +398,9 @@ async fn run_claude_driven_probe(
                 outcome.push(format!("probe config cleanup failed: {error}"));
             }
             return ProbeOutcome {
-                tools_exercised: Vec::new(),
                 failures,
                 cleanup_warnings: outcome,
+                ..Default::default()
             };
         }
     };
@@ -420,9 +421,9 @@ async fn run_claude_driven_probe(
                 outcome.push(format!("probe config cleanup failed: {cleanup_error}"));
             }
             return ProbeOutcome {
-                tools_exercised: Vec::new(),
                 failures,
                 cleanup_warnings: outcome,
+                ..Default::default()
             };
         }
     };
@@ -462,7 +463,11 @@ async fn run_claude_driven_probe(
             cancel.store(true, std::sync::atomic::Ordering::SeqCst);
             failures.push("probe turn 2 timed out".to_string());
         }
-        Ok(Ok(_)) => {}
+        Ok(Ok(result)) => {
+            if let Some(model) = result.model {
+                effective_model = model;
+            }
+        }
     }
 
     let observations2 = server.take_tool_observations();
@@ -603,6 +608,7 @@ async fn run_claude_driven_probe(
         tools_exercised,
         failures,
         cleanup_warnings,
+        effective_model,
     }
 }
 

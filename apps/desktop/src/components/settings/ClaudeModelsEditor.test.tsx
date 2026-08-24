@@ -73,6 +73,30 @@ describe("ClaudeModelsEditor", () => {
     expect(rowValues()).toEqual([""]);
   });
 
+  it("shows the current default model as a read-only first row", () => {
+    render(
+      <I18nProvider locale="en">
+        <ClaudeModelsEditor
+          rows={["glm-5.3", ""]}
+          defaultModel="claude-sonnet-4-5"
+          onChange={() => {}}
+        />
+      </I18nProvider>,
+    );
+    expect(rowValues()).toEqual(["claude-sonnet-4-5", "glm-5.3", ""]);
+    expect(inputs()[0]).toBeDisabled();
+    expect(screen.getByText("[default]")).toBeInTheDocument();
+    expect(
+      screen.getAllByRole("button", { name: /remove model/i }),
+    ).toHaveLength(2);
+  });
+
+  it("omits the default row when no model is connected", () => {
+    renderEditor(["glm-5.3"]);
+    expect(rowValues()).toEqual(["glm-5.3"]);
+    expect(screen.queryByText("[default]")).not.toBeInTheDocument();
+  });
+
   it("typing in a row keeps focus and does not auto-append", () => {
     renderEditor(["glm-5.3", ""]);
     const last = inputs()[1];

@@ -263,6 +263,8 @@ Probe 运行在开放式 Agent runtime，但 challenge 明确要求对测试目�
 
 测试使用独立、不持久化的 Claude probe session，并允许产生和自动应用仅限测试目标的临时变更。Claude 必须通过 Nest MCP 写能力创建包含一次性 challenge 的文档，再通过 Nest MCP 读取并返回确定性结果。测试不得修改已有用户文档；测试工作区、自动 Apply、索引等待和失败清理按 D30–D32 执行。
 
+2026-08 修订：Test connection 直接执行 D31 六工具 probe，不再额外运行独立 CLI round trip（避免三次 CLI 调用）；连接报告的 `resolved_cli_path`/`cli_version` 来自 version probe 与 detection，`effective_model` 来自 probe turn 结果。Save and connect 在内存或持久化中已存在与当前 CLI path 匹配的 Connected 报告时直接复用该报告，不重复 probe；否则执行完整测试。
+
 ### D26. Step 1 会话最低成本迁移
 
 保留已有 Backend Binding；旧 Claude session 的 Model Selection 初始化为 `CLI Default`，MCP credential 首次使用时延迟创建；旧 Nest session 使用当前 Settings 模型。旧会话均为开发态测试数据，Step 2 不增加复杂 transcript 对账、批量修复或兼容 UI。
@@ -566,6 +568,8 @@ Claude Backend Descriptor 的 Model options 由三类来源按顺序合并并按
 每个 option 带 D42 的 `source`。同一 ID 同时为 observed/custom 时只显示一项并标为 `observed`，Custom models 行编辑器仍保留用户原始行；删除 Custom row 不会删除仍有观察事实支持的 option。
 
 Test connection 的未保存结果应立即回流 Settings 中的只读 `Detected models` 列表；由于 Test 不持久化配置，若测试的 draft 与已保存 Claude 配置不一致，不得把该结果泄漏到 composer。这里的配置指纹沿用 Step 1 `matches_configured` 语义，即规范化后的 configured CLI path，且 Backend 本身必须已启用。Save and connect 持久化 Connection Report 后，或成功 ChatTurn 提交后，invalidate Backend Descriptor/session queries，使模型下一次打开 composer 选择框即可出现。若 Test 的配置指纹与已保存配置完全一致，descriptor 可以直接使用当前 runtime report。观察到实际模型不会把当前 `CLI Default` selection 自动改成 Explicit，也不会改写任一 session 的 Model Selection；用户主动选择 observed ID 后才作为 `ModelSelection::Explicit` 逐轮传入。
+
+2026-08 修订：Settings 不再显示只读 `Detected models` 列表（旧默认模型会与新默认累积展示，且信息与 Custom models 重复）。当前 Connection Report 的 `effective_model` 改为在 Custom models 行编辑器中显示为只读首行并标记 `[default]`，随每次成功 Test/Save 自动更新为新默认模型；该行不写入 `claude_custom_models`，用户的 Custom models 行仍由用户独占，composer Model options 的合并来源不变。
 
 ## 5. Claude CLI / MCP 实施前提
 

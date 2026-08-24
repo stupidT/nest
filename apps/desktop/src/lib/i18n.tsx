@@ -139,9 +139,8 @@ const messages: Record<Locale, MessageTree> = {
         detectionSucceeded: "Claude CLI {{version}} · {{strategy}}",
         detectionFailed: "No Claude CLI found on PATH or npm locations",
         detectionFailedPlaceholder: "Auto-detect Not Found",
-        detectedModels: "Detected models",
-        detectedModelsDescription:
-          "Models observed from successful tests and chats. Selectable in chat without adding them above.",
+        defaultModelLabel: "Default model",
+        defaultModelBadge: "[default]",
         couldNotDetect: "Could not detect Claude CLI",
         couldNotTest: "Could not test Claude connection",
         couldNotSave: "Could not save Claude settings",

@@ -7,8 +7,6 @@ use serde::Deserialize;
 use std::time::Duration;
 use tauri::State;
 
-const MIN_CONNECTION_TIMEOUT: Duration = Duration::from_secs(120);
-
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClaudeSettingsRequest {
@@ -143,15 +141,46 @@ pub async fn claude_save_settings(
             ..Default::default()
         });
     }
-    let mut report = test_connection(&request.cli_path, &state).await;
-    if report.status != ClaudeConnectionStatus::Connected {
-        tokio::time::sleep(std::time::Duration::from_millis(750)).await;
-        report = test_connection(&request.cli_path, &state).await;
-    }
-    if report.status == ClaudeConnectionStatus::Connected {
-        let conn = state.db.lock();
-        db::save_claude_connection_report(&conn, &report)?;
-    }
+    let trimmed = request.cli_path.trim().to_string();
+    let proven = {
+        let memory = state.claude_connection.lock().clone();
+        let persisted = {
+            let conn = state.db.lock();
+            db::load_claude_connection_report(&conn)
+        };
+        memory
+            .filter(|report| {
+                report.status == ClaudeConnectionStatus::Connected
+                    && report.matches_configured(&trimmed)
+            })
+            .or_else(|| {
+                persisted.filter(|report| {
+                    report.status == ClaudeConnectionStatus::Connected
+                        && report.matches_configured(&trimmed)
+                })
+            })
+    };
+    let report = match proven {
+        Some(report) => {
+            {
+                let conn = state.db.lock();
+                db::save_claude_connection_report(&conn, &report)?;
+            }
+            report
+        }
+        None => {
+            let mut report = test_connection(&request.cli_path, &state).await;
+            if report.status != ClaudeConnectionStatus::Connected {
+                tokio::time::sleep(Duration::from_millis(750)).await;
+                report = test_connection(&request.cli_path, &state).await;
+            }
+            if report.status == ClaudeConnectionStatus::Connected {
+                let conn = state.db.lock();
+                db::save_claude_connection_report(&conn, &report)?;
+            }
+            report
+        }
+    };
     *state.claude_connection.lock() = Some(report.clone());
     Ok(report)
 }
@@ -221,8 +250,8 @@ async fn test_connection(cli_path: &str, state: &SharedState) -> ClaudeConnectio
 
     for detection in &detections {
         match claude_cli::probe_version(detection, claude_cli::PROBE_VERSION_TIMEOUT).await {
-            ProbeOutcome::Version(_) => {
-                if let Some(report) = minimal_round_trip(detection, trimmed, state).await {
+            ProbeOutcome::Version(version) => {
+                if let Some(report) = full_tool_probe(detection, &version, trimmed, state).await {
                     return report;
                 }
             }
@@ -232,51 +261,42 @@ async fn test_connection(cli_path: &str, state: &SharedState) -> ClaudeConnectio
     unavailable_report(trimmed, "no CLI candidate completed the connection test")
 }
 
-async fn minimal_round_trip(
+async fn full_tool_probe(
     detection: &ClaudeDetection,
+    cli_version: &str,
     configured_path: &str,
     state: &SharedState,
 ) -> Option<ClaudeConnectionReport> {
-    let temp_dir = std::env::temp_dir();
-    let probe_session = uuid::Uuid::new_v4().to_string();
-    let outcome =
-        claude_cli::probe_connection(detection, &probe_session, &temp_dir, MIN_CONNECTION_TIMEOUT)
-            .await;
-    match outcome {
-        Ok(result) => {
-            let probe = crate::connection_probe::run_six_tool_probe(
-                state.clone(),
-                None,
-                Some(configured_path.to_string()),
-            )
-            .await;
-            if !probe.failures.is_empty() {
-                return Some(unavailable_report(
-                    configured_path,
-                    &format!("nest tool probe failed: {}", probe.failures.join("; ")),
-                ));
-            }
-            if !probe.cleanup_warnings.is_empty() {
-                return Some(unavailable_report(
-                    configured_path,
-                    &format!(
-                        "nest tool probe left residue: {}",
-                        probe.cleanup_warnings.join("; ")
-                    ),
-                ));
-            }
-            Some(ClaudeConnectionReport {
-                status: ClaudeConnectionStatus::Connected,
-                configured_cli_path: configured_path.to_string(),
-                resolved_cli_path: result.resolved_path,
-                cli_version: result.cli_version,
-                effective_model: result.effective_model,
-                tested_at: Utc::now().to_rfc3339(),
-                message: None,
-            })
-        }
-        Err(message) => Some(unavailable_report(configured_path, &message)),
+    let probe = crate::connection_probe::run_six_tool_probe(
+        state.clone(),
+        None,
+        Some(configured_path.to_string()),
+    )
+    .await;
+    if !probe.failures.is_empty() {
+        return Some(unavailable_report(
+            configured_path,
+            &format!("nest tool probe failed: {}", probe.failures.join("; ")),
+        ));
     }
+    if !probe.cleanup_warnings.is_empty() {
+        return Some(unavailable_report(
+            configured_path,
+            &format!(
+                "nest tool probe left residue: {}",
+                probe.cleanup_warnings.join("; ")
+            ),
+        ));
+    }
+    Some(ClaudeConnectionReport {
+        status: ClaudeConnectionStatus::Connected,
+        configured_cli_path: configured_path.to_string(),
+        resolved_cli_path: detection.resolved_path.clone(),
+        cli_version: cli_version.to_string(),
+        effective_model: probe.effective_model,
+        tested_at: Utc::now().to_rfc3339(),
+        message: None,
+    })
 }
 
 fn unavailable_report(cli_path: &str, message: &str) -> ClaudeConnectionReport {

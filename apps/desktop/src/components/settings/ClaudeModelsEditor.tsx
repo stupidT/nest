@@ -8,10 +8,12 @@ import { isDuplicateRow } from "./model-rows";
 export function ClaudeModelsEditor({
   rows,
   disabled = false,
+  defaultModel = "",
   onChange,
 }: {
   rows: string[];
   disabled?: boolean;
+  defaultModel?: string;
   onChange: (rows: string[]) => void;
 }) {
   const { t } = useI18n();
@@ -46,6 +48,22 @@ export function ClaudeModelsEditor({
 
   return (
     <div className="space-y-2">
+      {defaultModel.trim() !== "" && (
+        <div className="flex items-center gap-2">
+          <div className="min-w-0 flex-1">
+            <Input
+              value={defaultModel}
+              disabled
+              readOnly
+              aria-label={t("settings.claude.defaultModelLabel")}
+              className="font-mono text-xs"
+            />
+          </div>
+          <span className="shrink-0 rounded-md border bg-muted/40 px-2 py-1 font-mono text-xs text-muted-foreground">
+            {t("settings.claude.defaultModelBadge")}
+          </span>
+        </div>
+      )}
       {rows.map((row, index) => {
         const duplicate = isDuplicateRow(rows, index);
         return (
