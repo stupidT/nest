@@ -27,15 +27,24 @@ upstream/main ──(fetch/reset)──>  main  ──(rebase)──>  personal/
                                           │
                                   push to origin (fork)
                                           │
-                                      PR → upstream/main
+                                       PR → upstream/dev
+                                          │
+                   (integration & cross-platform testing on dev)
+                                          │
+                             dev → main (by upstream maintainer)
 ```
+
+Upstream maintains a `dev` integration branch. All PRs target `cyborgoat/nest:dev`;
+the upstream maintainer merges `dev` into `main` once features are validated across
+platforms.
 
 ### Branches
 
 | Branch | Lifetime | Purpose | Pushed? |
 |--------|----------|---------|---------|
-| `main` | permanent | Mirrors `upstream/main`. **Never commit here.** Sync only via `git fetch upstream && git reset --hard upstream/main`. | fetch only, never push |
-| `personal/dev` | permanent | Working trunk for this developer. Holds agent constraints, intermediate design docs, experimental code, WIP commits. Rebase onto `main` after each upstream sync. | push to `origin` (fork) for backup |
+| `main` | permanent | Mirrors `upstream/main` (production reference). **Never commit here.** Sync only via `git fetch upstream && git reset --hard upstream/main`. | fetch only, never push |
+| `dev` | permanent | Mirrors `upstream/dev` (integration branch). **Never commit here.** Sync only via `git fetch upstream && git reset --hard upstream/dev`. | fetch only, never push |
+| `personal/dev` | permanent | Working trunk for this developer. Holds agent constraints, intermediate design docs, experimental code, WIP commits. Rebase onto `dev` after each upstream sync. | push to `origin` (fork) for backup |
 | `feat/xxx` | short-lived | Feature work cut from `personal/dev`. May contain messy history. | optional, local |
 | `feat/xxx-clean` | short-lived | Clean branch for the upstream PR. Built by cherry-picking or interactive-rebasing only the **final** commits from `feat/xxx`. | push to `origin` (fork), PR target |
 
@@ -52,7 +61,7 @@ upstream/main ──(fetch/reset)──>  main  ──(rebase)──>  personal/
    - design drafts, exploration notes (put under `docs/_wip/`)
    - agent constraints, prompt experiments (this file and siblings)
    - scratch scripts, throwaway spikes
-6. **Before opening a PR**, rebase `feat/xxx-clean` onto latest `upstream/main`
+6. **Before opening a PR**, rebase `feat/xxx-clean` onto latest `upstream/dev`
    and run all sanity checks below.
 
 ### Daily workflow
@@ -63,9 +72,12 @@ git checkout main
 git fetch upstream
 git reset --hard upstream/main
 
-# --- Rebase personal work onto latest main ---
+git checkout dev
+git reset --hard upstream/dev
+
+# --- Rebase personal work onto latest dev (integration state) ---
 git checkout personal/dev
-git rebase main
+git rebase dev
 
 # --- Push backup to fork ---
 git push origin personal/dev
@@ -74,19 +86,17 @@ git push origin personal/dev
 ### Suggested flow for a new feature
 
 ```powershell
-# from personal/dev, up to date with main
+# from personal/dev, up to date with upstream/dev
 git checkout -b feat/my-feature
 # ... work, commit freely (messy history ok) ...
 
 # when ready to PR:
-git checkout main
 git fetch upstream
-git reset --hard upstream/main
-git checkout -b feat/my-feature-clean
+git checkout -b feat/my-feature-clean upstream/dev
 git cherry-pick <final-commit-sha-1> <final-commit-sha-2>
 # run sanity checks (see below), then push to fork and open PR
 git push origin feat/my-feature-clean
-# open PR on GitHub: feat/my-feature-clean → cyborgoat/nest:main
+# open PR on GitHub: feat/my-feature-clean → cyborgoat/nest:dev
 ```
 
 ## Repository layout
