@@ -558,6 +558,10 @@ fn turn_args(
         args.push("--model".to_string());
         args.push(model.to_string());
     }
+    if chat_mode == crate::knowledge_workspace::CapabilityMode::Agent {
+        args.push("--permission-mode".to_string());
+        args.push("bypassPermissions".to_string());
+    }
     if let Some(config_path) = mcp_config_path {
         args.push("--mcp-config".to_string());
         args.push(config_path.display().to_string());
@@ -2606,12 +2610,14 @@ const strict = args.includes('--strict-mcp-config') ? 'STRICT' : 'OPEN';
 const allowedIndex = args.indexOf('--allowedTools');
 const allowed = allowedIndex >= 0 ? args[allowedIndex + 1] : 'none';
 const readonlyOnly = !allowed.includes('knowledge_create') && !allowed.includes('knowledge_delete') && allowed.includes('knowledge_search') ? 'RO' : 'BAD';
+const permissionIndex = args.indexOf('--permission-mode');
+const permission = permissionIndex >= 0 ? args[permissionIndex + 1] : 'none';
 const config = mcp === 'none' ? '{}' : fs.readFileSync(mcp, 'utf8');
 const parsed = JSON.parse(config);
 const serverNames = Object.keys(parsed.mcpServers ?? {}).join(',');
 const lines = [];
 lines.push(JSON.stringify({type:'system',subtype:'init',session_id:'11111111-2222-4333-8444-555555555555',model:'m',claude_code_version:'v'}));
-lines.push(JSON.stringify({type:'result',subtype:'success',session_id:'11111111-2222-4333-8444-555555555555',result:strict + ':' + serverNames + ':' + readonlyOnly}));
+lines.push(JSON.stringify({type:'result',subtype:'success',session_id:'11111111-2222-4333-8444-555555555555',result:strict + ':' + serverNames + ':' + readonlyOnly + ':' + permission}));
 for (const line of lines) { console.log(line); }
 "#;
         let detection = fx.write_fake_cli(script);
@@ -2635,7 +2641,7 @@ for (const line of lines) { console.log(line); }
             system_instructions: None,
         };
         let result = run(&detection, request).await.unwrap();
-        assert_eq!(result.answer, "STRICT:nest:RO");
+        assert_eq!(result.answer, "STRICT:nest:RO:none");
     }
 
     #[tokio::test]
@@ -2649,7 +2655,9 @@ const allowedIndex = args.indexOf('--allowedTools');
 const allowed = allowedIndex >= 0 ? args[allowedIndex + 1] : 'none';
 const all = ['knowledge_search','knowledge_list','knowledge_read','knowledge_create','knowledge_replace','knowledge_delete']
   .filter(t => !allowed.includes(t));
-const ok = allowed !== 'none' && all.length === 0 ? 'ALL' : 'MISSING:' + all.join(',');
+const permissionIndex = args.indexOf('--permission-mode');
+const permission = permissionIndex >= 0 ? args[permissionIndex + 1] : 'none';
+const ok = allowed !== 'none' && all.length === 0 ? 'ALL:' + permission : 'MISSING:' + all.join(',');
 const lines = [];
 lines.push(JSON.stringify({type:'system',subtype:'init',session_id:'11111111-2222-4333-8444-555555555555',model:'m',claude_code_version:'v'}));
 lines.push(JSON.stringify({type:'result',subtype:'success',session_id:'11111111-2222-4333-8444-555555555555',result:ok}));
@@ -2669,7 +2677,7 @@ for (const line of lines) { console.log(line); }
             system_instructions: None,
         };
         let result = run(&detection, request).await.unwrap();
-        assert_eq!(result.answer, "ALL");
+        assert_eq!(result.answer, "ALL:bypassPermissions");
     }
 
     #[tokio::test]
