@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AppSettings,
+  AppOperationStatus,
+  BackendDescriptor,
   ChatMessage,
   ChatFileChangeDetail,
   ChatMode,
@@ -125,6 +127,8 @@ export const api = {
   workspaceHealth: () =>
     invoke<WorkspaceHealth>("workspace_health"),
   workspaceReindex: () => invoke<WorkspaceHealth>("workspace_reindex"),
+  appOperationStatus: () =>
+    invoke<AppOperationStatus | null>("app_operation_status"),
 
   indexStatus: () => invoke<IndexStatus>("index_status"),
   indexRebuild: () => invoke<IndexStatus>("index_rebuild"),
@@ -134,6 +138,8 @@ export const api = {
   chatGetOrCreateInitialSession: () =>
     invoke<ChatSession>("chat_get_or_create_initial_session"),
   chatListSessions: () => invoke<ChatSession[]>("chat_list_sessions"),
+  chatBackendDescriptors: () =>
+    invoke<BackendDescriptor[]>("chat_backend_descriptors"),
   chatUpdateSession: (
     sessionId: string,
     patch: { title?: string; pinned?: boolean; archived?: boolean; mode?: ChatMode },

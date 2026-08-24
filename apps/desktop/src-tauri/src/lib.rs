@@ -1,5 +1,6 @@
 mod agent;
 mod agent_tools;
+mod chat_backends;
 mod chat_events;
 mod chat_history;
 mod chat_runtime;
@@ -48,7 +49,10 @@ pub fn run() {
             app.manage(Arc::new(state) as SharedState);
             let shared_state = app.state::<SharedState>();
             let startup_state = shared_state.inner().clone();
+            let startup_operation = startup_state
+                .begin_operation(state::OperationKind::Reindex, "startup_reconciliation")?;
             tauri::async_runtime::spawn(async move {
+                let _operation = startup_operation;
                 if let Err(error) = vault_reconciliation::reconcile_vault(
                     &startup_state,
                     std::time::Duration::from_secs(300),
@@ -90,6 +94,7 @@ pub fn run() {
             commands::claude_model_options,
             commands::workspace_health,
             commands::workspace_reindex,
+            commands::app_operation_status,
             commands::settings_get,
             commands::settings_preview_knowledge_dir,
             commands::settings_change_knowledge_dir,
@@ -99,6 +104,7 @@ pub fn run() {
             commands::chat_create_session,
             commands::chat_get_or_create_initial_session,
             commands::chat_list_sessions,
+            commands::chat_backend_descriptors,
             commands::chat_update_session,
             commands::chat_update_selection,
             commands::chat_delete_session,

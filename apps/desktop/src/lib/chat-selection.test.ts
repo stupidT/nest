@@ -1,3 +1,4 @@
+import type { BackendDescriptor } from "@nest/shared";
 import { describe, expect, it } from "vitest";
 import {
   capsuleFromModelSelection,
@@ -5,131 +6,105 @@ import {
   modelSelectionFromCapsule,
 } from "./chat-selection";
 
-describe("deriveCapsules", () => {
-  it("always offers Nest and hides Claude when the toggle is off", () => {
-    const capsules = deriveCapsules({
-      activeBackendId: "nest",
-      boundBackend: null,
-      claudeEnabled: false,
-      claudeStatus: "connected",
-      claudeModelIds: ["glm-5.3"],
-      claudeDefaultModelLabel: null,
-      nestModelLabel: "gpt-4o-mini",
-    });
-    expect(capsules.backends).toHaveLength(1);
-    expect(capsules.backends[0].id).toBe("nest");
-    expect(capsules.canChangeBackend).toBe(true);
-  });
+function descriptor(
+  id: string,
+  options: Partial<BackendDescriptor> = {},
+): BackendDescriptor {
+  return {
+    id,
+    label: id === "nest" ? "Nest Agent" : "Claude",
+    enabled: true,
+    availability: "ready",
+    reason_code: null,
+    message: null,
+    modes: [
+      { id: "ask", available: true, reason_code: null, message: null },
+      { id: "agent", available: true, reason_code: null, message: null },
+    ],
+    models: [
+      {
+        selection: { kind: "default", value: null },
+        label: id === "nest" ? "gpt-4o-mini" : "CLI Default (default)",
+        source: "default",
+      },
+    ],
+    native_tool_profile: "test",
+    knowledge_profile: "test",
+    settings_target: null,
+    ...options,
+  };
+}
 
-  it("offers Claude enabled when connected or last-connected", () => {
-    for (const status of ["connected", "last_connected"] as const) {
-      const capsules = deriveCapsules({
+describe("deriveCapsules", () => {
+  it("only offers enabled descriptors unless the disabled backend is active", () => {
+    const disabled = descriptor("claude", {
+      enabled: false,
+      availability: "unavailable",
+      reason_code: "disabled",
+    });
+    expect(
+      deriveCapsules({
+        descriptors: [descriptor("nest"), disabled],
         activeBackendId: "nest",
         boundBackend: null,
-        claudeEnabled: true,
-        claudeStatus: status,
-        claudeModelIds: [],
-        claudeDefaultModelLabel: null,
-        nestModelLabel: null,
-      });
-      expect(capsules.backends).toHaveLength(2);
-      expect(capsules.backends[1].disabled).toBe(false);
-    }
-  });
-
-  it("keeps a disabled Claude entry with a reason when unavailable", () => {
-    const capsules = deriveCapsules({
-      activeBackendId: "nest",
-      boundBackend: null,
-      claudeEnabled: true,
-      claudeStatus: "unavailable",
-      claudeModelIds: [],
-      claudeDefaultModelLabel: null,
-      nestModelLabel: null,
-    });
-    expect(capsules.backends).toHaveLength(2);
-    expect(capsules.backends[1].disabled).toBe(true);
-    expect(capsules.backends[1].disabledReason).toContain("unavailable");
-  });
-
-  it("shows Nest models only when the active selection is Nest", () => {
-    const capsules = deriveCapsules({
-      activeBackendId: "nest",
-      boundBackend: null,
-      claudeEnabled: true,
-      claudeStatus: "connected",
-      claudeModelIds: ["glm-5.3"],
-      claudeDefaultModelLabel: "glm-5.3[1m]",
-      nestModelLabel: "gpt-4o-mini",
-    });
-    expect(capsules.models).toEqual([
-      { id: "default", label: "gpt-4o-mini" },
-    ]);
-  });
-
-  it("shows Claude models when the active selection is Claude", () => {
-    const capsules = deriveCapsules({
-      activeBackendId: "claude",
-      boundBackend: null,
-      claudeEnabled: true,
-      claudeStatus: "connected",
-      claudeModelIds: ["glm-5.3"],
-      claudeDefaultModelLabel: "glm-5.3[1m]",
-      nestModelLabel: "gpt-4o-mini",
-    });
-    expect(capsules.models).toEqual([
-      { id: "default", label: "glm-5.3[1m] (default)" },
-      { id: "glm-5.3", label: "glm-5.3" },
-    ]);
-  });
-
-  it("keeps the observed default model selectable as an explicit option", () => {
-    const capsules = deriveCapsules({
-      activeBackendId: "claude",
-      boundBackend: null,
-      claudeEnabled: true,
-      claudeStatus: "connected",
-      claudeModelIds: ["glm-5.3[1m]", "glm-5.3"],
-      claudeDefaultModelLabel: "glm-5.3[1m]",
-      nestModelLabel: null,
-    });
-    expect(capsules.models).toEqual([
-      { id: "default", label: "glm-5.3[1m] (default)" },
-      { id: "glm-5.3[1m]", label: "glm-5.3[1m]" },
-      { id: "glm-5.3", label: "glm-5.3" },
-    ]);
-  });
-
-  it("falls back to a CLI Default label when no observed model exists", () => {
-    const capsules = deriveCapsules({
-      activeBackendId: "claude",
-      boundBackend: null,
-      claudeEnabled: true,
-      claudeStatus: "connected",
-      claudeModelIds: [],
-      claudeDefaultModelLabel: null,
-      nestModelLabel: null,
-    });
-    expect(capsules.models).toEqual([
-      { id: "default", label: "CLI Default (default)" },
-    ]);
-  });
-
-  it("locks the backend capsule once bound", () => {
-    const capsules = deriveCapsules({
+      }).backends,
+    ).toHaveLength(1);
+    const active = deriveCapsules({
+      descriptors: [descriptor("nest"), disabled],
       activeBackendId: "claude",
       boundBackend: "claude",
-      claudeEnabled: true,
-      claudeStatus: "connected",
-      claudeModelIds: ["glm-5.3"],
-      claudeDefaultModelLabel: null,
-      nestModelLabel: null,
+    });
+    expect(active.backends[1].disabled).toBe(true);
+    expect(active.backends[1].disabledReason).toBe("disabled");
+  });
+
+  it("derives model and mode capsules entirely from the active descriptor", () => {
+    const claude = descriptor("claude", {
+      models: [
+        {
+          selection: { kind: "default", value: null },
+          label: "Opus (default)",
+          source: "default",
+        },
+        {
+          selection: { kind: "explicit", value: "sonnet" },
+          label: "sonnet",
+          source: "custom",
+        },
+      ],
+      modes: [
+        {
+          id: "ask",
+          available: false,
+          reason_code: "ask_unavailable",
+          message: null,
+        },
+        { id: "agent", available: true, reason_code: null, message: null },
+      ],
+    });
+    const capsules = deriveCapsules({
+      descriptors: [descriptor("nest"), claude],
+      activeBackendId: "claude",
+      boundBackend: null,
+    });
+    expect(capsules.models).toEqual([
+      { id: "default", label: "Opus (default)" },
+      { id: "sonnet", label: "sonnet" },
+    ]);
+    expect(capsules.modes[0]).toMatchObject({
+      id: "ask",
+      disabled: true,
+      disabledReason: "ask_unavailable",
+    });
+  });
+
+  it("locks backend selection once the session is bound", () => {
+    const capsules = deriveCapsules({
+      descriptors: [descriptor("nest"), descriptor("claude")],
+      activeBackendId: "claude",
+      boundBackend: "claude",
     });
     expect(capsules.canChangeBackend).toBe(false);
-    expect(capsules.models).toEqual([
-      { id: "default", label: "CLI Default (default)" },
-      { id: "glm-5.3", label: "glm-5.3" },
-    ]);
   });
 });
 

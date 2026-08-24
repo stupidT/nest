@@ -172,6 +172,11 @@ export function SettingsPanel() {
     queryKey: queryKeys.settings,
     queryFn: api.settingsGet,
   });
+  const operationQuery = useQuery({
+    queryKey: queryKeys.appOperation,
+    queryFn: api.appOperationStatus,
+    refetchInterval: 500,
+  });
 
   const indexQuery = useQuery({
     queryKey: queryKeys.index,
@@ -438,6 +443,12 @@ export function SettingsPanel() {
       />
       <ScrollArea className="min-h-0 flex-1">
         <div className="mx-auto max-w-2xl px-6 py-5">
+          {operationQuery.data && (
+            <p className="mb-3 rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+              {operationQuery.data.kind.replace(/_/g, " ")} is running for {operationQuery.data.owner}
+            </p>
+          )}
+          <fieldset disabled={operationQuery.data != null} className="contents">
           <SettingsSection>
                 <GeneralGroup icon={Cloud} title={t("settings.knowledgeHub")}>
                   <Field
@@ -682,6 +693,7 @@ export function SettingsPanel() {
                   </div>
                 </Field>
           </SettingsSection>
+          </fieldset>
         </div>
       </ScrollArea>
       <AlertDialog

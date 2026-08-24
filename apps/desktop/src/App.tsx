@@ -463,10 +463,15 @@ function WorkspaceHealthBanner() {
     queryFn: api.workspaceHealth,
     refetchInterval: 30_000,
   });
+  const operationQuery = useQuery({
+    queryKey: queryKeys.appOperation,
+    queryFn: api.appOperationStatus,
+    refetchInterval: 500,
+  });
   const health = healthQuery.data;
   if (!health?.reindex_required) return null;
   const runReindex = () => {
-    if (reindexing) return;
+    if (reindexing || operationQuery.data) return;
     setReindexing(true);
     void api
       .workspaceReindex()
@@ -485,7 +490,7 @@ function WorkspaceHealthBanner() {
       </span>
       <button
         type="button"
-        disabled={reindexing}
+        disabled={reindexing || operationQuery.data != null}
         onClick={runReindex}
         className="shrink-0 rounded-md bg-warning/20 px-2 py-0.5 font-medium hover:bg-warning/30 disabled:opacity-60"
       >

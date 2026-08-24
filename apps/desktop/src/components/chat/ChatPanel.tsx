@@ -163,33 +163,24 @@ export function ChatPanel() {
     queryFn: api.claudeConnectionStatus,
   });
   const claudeStatus = claudeConnectionQuery.data?.status ?? null;
-  const claudeEnabled = claudeStatus !== "disabled" && claudeStatus !== null;
-
-  const settingsQuery = useQuery({
-    queryKey: queryKeys.settings,
-    queryFn: api.settingsGet,
+  const descriptorsQuery = useQuery({
+    queryKey: queryKeys.chatBackendDescriptors,
+    queryFn: api.chatBackendDescriptors,
+    refetchInterval: 1000,
   });
-  const modelOptionsQuery = useQuery({
-    queryKey: queryKeys.claudeModelOptions,
-    queryFn: api.claudeModelOptions,
+  const operationQuery = useQuery({
+    queryKey: queryKeys.appOperation,
+    queryFn: api.appOperationStatus,
+    refetchInterval: 500,
   });
-  const claudeModelIds = (modelOptionsQuery.data ?? [])
-    .filter((option) => option.source !== "default")
-    .map((option) => option.model_id)
-    .filter((model) => model.trim() !== "");
 
   const activeBackendId: string =
     currentSession?.backend ?? currentSession?.selected_backend_id ?? "nest";
 
   const capsules = deriveCapsules({
-    activeBackendId: activeBackendId as "nest" | "claude",
+    descriptors: descriptorsQuery.data ?? [],
+    activeBackendId,
     boundBackend: currentSession?.backend ?? null,
-    claudeEnabled,
-    claudeStatus,
-    claudeModelIds,
-    claudeDefaultModelLabel:
-      claudeConnectionQuery.data?.effective_model?.trim() || null,
-    nestModelLabel: settingsQuery.data?.chat_model?.trim() || null,
   });
   const activeModelId = capsuleFromModelSelection(
     currentSession?.selected_model ?? { kind: "default", value: null },
@@ -309,7 +300,23 @@ export function ChatPanel() {
     currentSession ? { backend: currentSession.backend, backend_status: currentSession.backend_status } : null,
     claudeStatus,
   );
-  const composerBlocked: string | null = isSending ? null : composerGate.reason;
+  const activeDescriptor = descriptorsQuery.data?.find(
+    (descriptor) => descriptor.id === activeBackendId,
+  );
+  const descriptorBlocked =
+    activeDescriptor != null &&
+    (activeDescriptor.availability === "unavailable" ||
+      !activeDescriptor.enabled);
+  const activeOperation = operationQuery.data;
+  const composerBlocked: string | null = isSending
+    ? null
+    : activeOperation
+      ? `${activeOperation.kind.replace(/_/g, " ")} is running`
+      : descriptorBlocked
+        ? (activeDescriptor.message ??
+          activeDescriptor.reason_code ??
+          "Selected backend is unavailable")
+        : composerGate.reason;
   const backendNotice = claudeBackendNotice(
     currentSession ? { backend: currentSession.backend, backend_status: currentSession.backend_status } : null,
     claudeStatus,
@@ -818,6 +825,7 @@ export function ChatPanel() {
         <MentionComposer
           candidates={mentionCandidates}
           isGenerating={isGeneratingHere}
+          controlsDisabled={activeOperation != null}
           canSend={!!sessionId && !isSending && !composerBlocked}
           onSend={(query, focusPaths) => {
             if (!sessionId) return;
@@ -833,6 +841,7 @@ export function ChatPanel() {
           onModeChange={changeMode}
           backends={capsules.backends}
           models={capsules.models}
+          modes={capsules.modes}
           activeBackendId={activeBackendId}
           activeModelId={activeModelId}
           canChangeBackend={capsules.canChangeBackend}

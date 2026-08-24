@@ -514,7 +514,7 @@ export type ChatFileChangeDetail = ChatFileChangeSummary & {
   resolution_reason?: string | null;
 };
 
-export type ChatBackend = "nest" | "claude";
+export type ChatBackend = string;
 export type ChatBackendStatus = "uninitialized" | "ready" | "unresumable";
 
 export type ModelSelectionKind = "default" | "explicit";
@@ -522,6 +522,51 @@ export type ModelSelectionKind = "default" | "explicit";
 export type ModelSelection = {
   kind: ModelSelectionKind;
   value: string | null;
+};
+
+export type BackendAvailability =
+  | "checking"
+  | "ready"
+  | "last_verified"
+  | "unavailable";
+
+export type BackendModeDescriptor = {
+  id: ChatMode;
+  available: boolean;
+  reason_code: string | null;
+  message: string | null;
+};
+
+export type BackendModelDescriptor = {
+  selection: ModelSelection;
+  label: string;
+  source: string;
+};
+
+export type BackendDescriptor = {
+  id: ChatBackend;
+  label: string;
+  enabled: boolean;
+  availability: BackendAvailability;
+  reason_code: string | null;
+  message: string | null;
+  modes: BackendModeDescriptor[];
+  models: BackendModelDescriptor[];
+  native_tool_profile: string;
+  knowledge_profile: string;
+  settings_target: string | null;
+};
+
+export type AppOperationStatus = {
+  kind:
+    | "chat_turn"
+    | "connection_probe"
+    | "save_claude_settings"
+    | "reindex"
+    | "vault_switch"
+    | "delete_session";
+  owner: string;
+  started_at: string;
 };
 
 export type ChatSessionTitleSource = "placeholder" | "llm" | "manual" | "local";

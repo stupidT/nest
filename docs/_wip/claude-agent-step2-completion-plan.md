@@ -20,7 +20,7 @@
 - [x] staged change 与 Direct Workspace Change 二次归并及大文件安全边界
 - [x] Proposal claim、apply journal 与启动恢复
 - [x] 完整 Claude 两轮六工具 connection probe
-- [ ] Backend Descriptor、Knowledge effective view 与 app-wide operation slot
+- [x] Backend Descriptor、Knowledge effective view 与 app-wide operation slot
 - [ ] 全量回归、Windows 手工验收与 Step 2 最终收口
 
 ## 2. P0：Vault Reconciliation 与 Reindex 闭环

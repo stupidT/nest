@@ -1,7 +1,7 @@
 import type {
+  BackendDescriptor,
   ChatBackend,
   ChatMode,
-  ClaudeConnectionStatus,
   ModelSelection,
 } from "@nest/shared";
 
@@ -17,9 +17,17 @@ export type ModelOption = {
   label: string;
 };
 
+export type ModeOption = {
+  id: ChatMode;
+  label: string;
+  disabled: boolean;
+  disabledReason: string | null;
+};
+
 export type SelectionCapsules = {
   backends: BackendOption[];
   models: ModelOption[];
+  modes: ModeOption[];
   canChangeBackend: boolean;
 };
 
@@ -27,56 +35,52 @@ export const NEST_LABEL = "Nest Agent";
 export const CLAUDE_LABEL = "Claude";
 
 export function deriveCapsules(params: {
-  activeBackendId: ChatBackend | "nest" | "claude";
+  descriptors: BackendDescriptor[];
+  activeBackendId: ChatBackend;
   boundBackend: ChatBackend | null;
-  claudeEnabled: boolean;
-  claudeStatus: ClaudeConnectionStatus | null;
-  claudeModelIds: string[];
-  claudeDefaultModelLabel: string | null;
-  nestModelLabel: string | null;
 }): SelectionCapsules {
-  const {
-    activeBackendId,
-    boundBackend,
-    claudeEnabled,
-    claudeStatus,
-    claudeModelIds,
-    claudeDefaultModelLabel,
-    nestModelLabel,
-  } = params;
-
-  const claudeUsable =
-    claudeEnabled && (claudeStatus === "connected" || claudeStatus === "last_connected");
-
-  const backends: BackendOption[] = [
-    { id: "nest", label: NEST_LABEL, disabled: false, disabledReason: null },
-  ];
-  if (claudeEnabled) {
-    backends.push({
-      id: "claude",
-      label: CLAUDE_LABEL,
-      disabled: !claudeUsable,
-      disabledReason: claudeUsable
-        ? null
-        : "Claude connection is unavailable. Test it in Settings.",
+  const active = params.descriptors.find(
+    (descriptor) => descriptor.id === params.activeBackendId,
+  );
+  const backends = params.descriptors
+    .filter(
+      (descriptor) =>
+        descriptor.enabled || descriptor.id === params.activeBackendId,
+    )
+    .map((descriptor) => {
+      const disabled =
+        descriptor.availability !== "ready" &&
+        descriptor.availability !== "last_verified";
+      return {
+        id: descriptor.id,
+        label: descriptor.label,
+        disabled,
+        disabledReason: disabled
+          ? (descriptor.message ?? descriptor.reason_code ?? "Backend unavailable")
+          : null,
+      };
     });
-  }
-
-  const models: ModelOption[] =
-    activeBackendId === "claude"
-      ? [
-          {
-            id: "default",
-            label: `${claudeDefaultModelLabel ?? "CLI Default"} (default)`,
-          },
-          ...claudeModelIds.map((id) => ({ id, label: id })),
-        ]
-      : [{ id: "default", label: nestModelLabel ?? "Default (API)" }];
+  const models = (active?.models ?? []).map((model) => ({
+    id:
+      model.selection.kind === "default"
+        ? "default"
+        : (model.selection.value ?? "default"),
+    label: model.label,
+  }));
+  const modes = (active?.modes ?? []).map((mode) => ({
+    id: mode.id,
+    label: capsuleModeLabel(mode.id),
+    disabled: !mode.available,
+    disabledReason: mode.available
+      ? null
+      : (mode.message ?? mode.reason_code ?? "Mode unavailable"),
+  }));
 
   return {
     backends,
     models,
-    canChangeBackend: boundBackend === null,
+    modes,
+    canChangeBackend: params.boundBackend === null,
   };
 }
 

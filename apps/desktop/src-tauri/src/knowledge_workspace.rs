@@ -163,34 +163,16 @@ impl KnowledgeWorkspace {
         query: &str,
         limit: Option<u32>,
     ) -> KnowledgeResult<Vec<KnowledgeHit>> {
-        let limit = limit.unwrap_or(5).clamp(1, 20);
-        if query.trim().is_empty() {
-            return Err(invalid("query must not be empty"));
-        }
-        let prefixes = {
-            let conn = state.db.lock();
-            db::list_sync_state(&conn)
-                .map_err(|error| KnowledgeError::new("internal", error.to_string()))?
-                .into_iter()
-                .filter(|pack| pack.active)
-                .map(|pack| pack.local_path)
-                .collect::<Vec<_>>()
-        };
-        let citations =
-            crate::retrieval::retrieve(&state.app_data_dir, state, query, &prefixes, limit)
-                .await
-                .map_err(|error| {
-                    KnowledgeError::new("internal", format!("retrieval failed: {error}"))
-                })?;
-        Ok(citations
-            .into_iter()
-            .map(|citation| KnowledgeHit {
-                file_path: citation.file_path,
-                title: citation.title,
-                snippet: citation.snippet,
-                score: citation.score,
-            })
-            .collect())
+        search_effective(state, query, limit, None).await
+    }
+
+    pub async fn search_turn_with_overlay(
+        state: &SharedState,
+        query: &str,
+        limit: Option<u32>,
+        staged: &BTreeMap<String, Option<String>>,
+    ) -> KnowledgeResult<Vec<KnowledgeHit>> {
+        search_effective(state, query, limit, Some(staged)).await
     }
 
     pub fn open_turn(
@@ -217,31 +199,15 @@ impl KnowledgeWorkspace {
         query: &str,
         limit: Option<u32>,
     ) -> KnowledgeResult<Vec<KnowledgeHit>> {
-        let limit = limit.unwrap_or(5).clamp(1, 20);
-        if query.trim().is_empty() {
-            return Err(invalid("query must not be empty"));
-        }
-        let prefixes = self
-            .active_pack_roots()
-            .map_err(|error| KnowledgeError::new("internal", error.to_string()))?;
-        let citations = crate::retrieval::retrieve(
-            &self.state.app_data_dir,
-            &self.state,
-            query,
-            &prefixes,
-            limit,
-        )
-        .await
-        .map_err(|error| KnowledgeError::new("internal", format!("retrieval failed: {error}")))?;
-        Ok(citations
-            .into_iter()
-            .map(|citation| KnowledgeHit {
-                file_path: citation.file_path,
-                title: citation.title,
-                snippet: citation.snippet,
-                score: citation.score,
-            })
-            .collect())
+        let staged = self.staged_overlay();
+        search_effective(&self.state, query, limit, Some(&staged)).await
+    }
+
+    pub fn staged_overlay(&self) -> BTreeMap<String, Option<String>> {
+        self.staged
+            .iter()
+            .map(|(path, entry)| (path.clone(), entry.current.clone()))
+            .collect()
     }
 
     pub fn list(&self, query: Option<&str>) -> KnowledgeResult<KnowledgeListResult> {
@@ -258,11 +224,7 @@ impl KnowledgeWorkspace {
                 break;
             }
         }
-        let pending = {
-            let conn = self.state.db.lock();
-            db::list_pending_chat_file_changes(&conn)
-                .map_err(|error| KnowledgeError::new("internal", error.to_string()))?
-        };
+        let pending = effective_pending_changes(&self.state)?;
         for change in pending {
             let path = change.path;
             if change.new_content.is_none() {
@@ -666,6 +628,126 @@ fn ensure_no_symlink_components(root: &Path, rel_path: &str) -> AppResult<()> {
     Ok(())
 }
 
+async fn search_effective(
+    state: &SharedState,
+    query: &str,
+    limit: Option<u32>,
+    staged: Option<&BTreeMap<String, Option<String>>>,
+) -> KnowledgeResult<Vec<KnowledgeHit>> {
+    let limit = limit.unwrap_or(5).clamp(1, 20) as usize;
+    let query = query.trim();
+    if query.is_empty() {
+        return Err(invalid("query must not be empty"));
+    }
+    let prefixes = {
+        let conn = state.db.lock();
+        db::list_sync_state(&conn)
+            .map_err(|error| KnowledgeError::new("internal", error.to_string()))?
+            .into_iter()
+            .filter(|pack| pack.active)
+            .map(|pack| pack.local_path)
+            .collect::<Vec<_>>()
+    };
+    let pending = effective_pending_changes(state)?;
+    let mut overlays = BTreeMap::<String, (u8, Option<String>)>::new();
+    for change in pending {
+        overlays.insert(change.path, (1, change.new_content));
+    }
+    if let Some(staged) = staged {
+        for (path, content) in staged {
+            overlays.insert(path.clone(), (2, content.clone()));
+        }
+    }
+
+    let citations =
+        crate::retrieval::retrieve(&state.app_data_dir, state, query, &prefixes, limit as u32)
+            .await
+            .map_err(|error| {
+                KnowledgeError::new("internal", format!("retrieval failed: {error}"))
+            })?;
+    let mut hits = citations
+        .into_iter()
+        .filter(|citation| !overlays.contains_key(&citation.file_path))
+        .map(|citation| KnowledgeHit {
+            file_path: citation.file_path,
+            title: citation.title,
+            snippet: citation.snippet,
+            score: citation.score,
+        })
+        .collect::<Vec<_>>();
+
+    let query_lower = query.to_lowercase();
+    let terms = query_lower
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|term| !term.is_empty())
+        .collect::<Vec<_>>();
+    let mut overlay_hits = overlays
+        .into_iter()
+        .filter_map(|(path, (priority, content))| {
+            let content = content?;
+            if !prefixes
+                .iter()
+                .any(|prefix| Path::new(&path).starts_with(prefix))
+            {
+                return None;
+            }
+            let searchable = format!("{}\n{}", path, content).to_lowercase();
+            let matches = searchable.contains(&query_lower)
+                || (!terms.is_empty() && terms.iter().all(|term| searchable.contains(term)));
+            if !matches {
+                return None;
+            }
+            Some((
+                priority,
+                KnowledgeHit {
+                    title: path
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(&path)
+                        .trim_end_matches(".md")
+                        .to_string(),
+                    file_path: path,
+                    snippet: content.chars().take(320).collect(),
+                    score: if priority == 2 { 2.0 } else { 1.5 },
+                },
+            ))
+        })
+        .collect::<Vec<_>>();
+    overlay_hits.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| left.1.file_path.cmp(&right.1.file_path))
+    });
+    let mut effective = overlay_hits
+        .into_iter()
+        .map(|(_, hit)| hit)
+        .collect::<Vec<_>>();
+    effective.append(&mut hits);
+    effective.truncate(limit);
+    Ok(effective)
+}
+
+fn effective_pending_changes(
+    state: &SharedState,
+) -> KnowledgeResult<Vec<db::ChatFileChangeDetail>> {
+    let pending = {
+        let conn = state.db.lock();
+        db::list_pending_chat_file_changes(&conn)
+            .map_err(|error| KnowledgeError::new("internal", error.to_string()))?
+    };
+    for change in &pending {
+        let disk = vault::read_file(&state.vault_path(), &change.path).ok();
+        if disk != change.old_content {
+            crate::knowledge_review::reconcile_pending_change(state, change)
+                .map_err(|error| KnowledgeError::new("internal", error.to_string()))?;
+        }
+    }
+    let conn = state.db.lock();
+    db::list_pending_chat_file_changes(&conn)
+        .map_err(|error| KnowledgeError::new("internal", error.to_string()))
+}
+
 fn collect_markdown_paths(
     node: &vault::TreeNode,
     roots: &[String],
@@ -753,6 +835,66 @@ mod tests {
 
         assert!(listed.contains(&"list-pack/created.md".to_string()));
         assert!(!listed.contains(&"list-pack/existing.md".to_string()));
+    }
+
+    #[tokio::test]
+    async fn search_prefers_turn_staged_content_and_hides_staged_delete() {
+        let state = test_state_with_pack("search-pack", "old.md", "obsolete marker");
+        let mut workspace = KnowledgeWorkspace::open_turn(state, CapabilityMode::Agent, Vec::new());
+        workspace
+            .create("search-pack/new.md", "fresh overlay token")
+            .unwrap();
+        workspace.delete("search-pack/old.md").unwrap();
+
+        let fresh = workspace
+            .search("fresh overlay token", Some(10))
+            .await
+            .unwrap();
+        let obsolete = workspace.search("obsolete marker", Some(10)).await.unwrap();
+
+        assert_eq!(fresh[0].file_path, "search-pack/new.md");
+        assert!(obsolete
+            .iter()
+            .all(|hit| hit.file_path != "search-pack/old.md"));
+    }
+
+    #[tokio::test]
+    async fn search_includes_pending_proposal_content() {
+        let state = test_state_with_pack("pending-pack", "base.md", "base");
+        let session = {
+            let conn = state.db.lock();
+            db::create_session(&conn, "pending").unwrap()
+        };
+        {
+            let mut conn = state.db.lock();
+            db::add_message(
+                &mut conn,
+                &session.id,
+                db::NewChatMessage {
+                    role: "assistant",
+                    content: "proposal",
+                    citations: None,
+                    thinking: None,
+                    thinking_seconds: None,
+                    file_changes: &[db::NewChatFileChange {
+                        path: "pending-pack/new.md".to_string(),
+                        operation: "created".to_string(),
+                        old_content: None,
+                        new_content: Some("pending unique token".to_string()),
+                        status: "pending".to_string(),
+                        rebase_count: 0,
+                        resolution_reason: None,
+                    }],
+                },
+            )
+            .unwrap();
+        }
+
+        let hits = KnowledgeWorkspace::search_turn(&state, "pending unique token", Some(10))
+            .await
+            .unwrap();
+
+        assert_eq!(hits[0].file_path, "pending-pack/new.md");
     }
 
     fn test_state_with_pack(pack: &str, file: &str, content: &str) -> SharedState {

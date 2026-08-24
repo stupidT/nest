@@ -9,8 +9,8 @@ import {
 } from "react";
 import { Button } from "@/components/ui/button";
 import {
-  capsuleModeLabel,
   type BackendOption,
+  type ModeOption,
   type ModelOption,
 } from "@/lib/chat-selection";
 import { cn } from "@/lib/utils";
@@ -26,6 +26,7 @@ type Candidate = MentionRef;
 type Props = {
   candidates: Candidate[];
   isGenerating?: boolean;
+  controlsDisabled?: boolean;
   onSend: (text: string, focusPaths: string[]) => void;
   onStop?: () => void;
   canSend: boolean;
@@ -33,6 +34,7 @@ type Props = {
   onModeChange: (mode: ChatMode) => void;
   backends: BackendOption[];
   models: ModelOption[];
+  modes: ModeOption[];
   activeBackendId: string;
   activeModelId: string;
   canChangeBackend: boolean;
@@ -46,6 +48,7 @@ type Props = {
 export function MentionComposer({
   candidates,
   isGenerating = false,
+  controlsDisabled = false,
   onSend,
   onStop,
   canSend,
@@ -53,6 +56,7 @@ export function MentionComposer({
   onModeChange,
   backends,
   models,
+  modes,
   activeBackendId,
   activeModelId,
   canChangeBackend,
@@ -262,7 +266,7 @@ export function MentionComposer({
           <CapsuleSelect
             ariaLabel="Chat agent"
             value={activeBackendId}
-            disabled={isGenerating}
+            disabled={isGenerating || controlsDisabled}
             onChange={onBackendChange}
             options={backends.map((b) => ({
               value: b.id,
@@ -279,7 +283,7 @@ export function MentionComposer({
           <CapsuleSelect
             ariaLabel="Chat model"
             value={activeModelId}
-            disabled={isGenerating}
+            disabled={isGenerating || controlsDisabled}
             onChange={onModelChange}
             options={models.map((m) => ({
               value: m.id,
@@ -289,12 +293,16 @@ export function MentionComposer({
           <CapsuleSelect
             ariaLabel="Chat mode"
             value={mode}
-            disabled={isGenerating}
+            disabled={isGenerating || controlsDisabled}
             onChange={(value) => onModeChange(value as ChatMode)}
-            options={[
-              { value: "ask", label: capsuleModeLabel("ask") },
-              { value: "agent", label: capsuleModeLabel("agent") },
-            ]}
+            options={modes.map((option) => ({
+              value: option.id,
+              label: option.label,
+              disabled: option.disabled,
+              title: option.disabled
+                ? (option.disabledReason ?? undefined)
+                : undefined,
+            }))}
           />
         </div>
         <div className="relative">
@@ -311,7 +319,7 @@ export function MentionComposer({
           <textarea
             ref={textareaRef}
             value={text}
-            disabled={isGenerating}
+            disabled={isGenerating || controlsDisabled}
             placeholder={mode === "agent" ? "Describe a change…" : "Ask anything…"}
             rows={2}
             className="relative block w-full resize-none bg-transparent pr-8 text-sm leading-5 text-transparent caret-foreground outline-none selection:bg-primary/20 selection:text-foreground placeholder:text-muted-foreground"

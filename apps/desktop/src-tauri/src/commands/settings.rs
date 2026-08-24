@@ -149,7 +149,10 @@ pub fn settings_change_knowledge_dir(
     knowledge_dir: String,
     mode: VaultChangeMode,
 ) -> AppResult<VaultChangeResult> {
-    state.ensure_no_chat_turn()?;
+    let _slot = state.inner().begin_operation(
+        crate::state::OperationKind::VaultSwitch,
+        knowledge_dir.trim().to_string(),
+    )?;
     let current = state.vault_path();
     let target = resolve_vault_change_target(state.inner(), &knowledge_dir)?;
     validate_vault_change(&current, &target)?;

@@ -40,7 +40,44 @@ pub struct AppState {
     pub hub_auth: Mutex<Option<AuthSession>>,
     pub hub_auth_refresh: tokio::sync::Mutex<()>,
     pub mcp: Mutex<Option<McpRuntime>>,
-    chat_turn_slot: std::sync::atomic::AtomicBool,
+    operation_slot: Mutex<Option<OperationLease>>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationKind {
+    ChatTurn,
+    ConnectionProbe,
+    SaveClaudeSettings,
+    Reindex,
+    VaultSwitch,
+    DeleteSession,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OperationStatus {
+    pub kind: OperationKind,
+    pub owner: String,
+    pub started_at: String,
+}
+
+struct OperationLease {
+    id: String,
+    status: OperationStatus,
+}
+
+pub struct OperationGuard {
+    state: SharedState,
+    id: String,
+}
+
+impl Drop for OperationGuard {
+    fn drop(&mut self) {
+        let mut slot = self.state.operation_slot.lock();
+        if slot.as_ref().is_some_and(|lease| lease.id == self.id) {
+            *slot = None;
+        }
+    }
 }
 
 pub struct McpRuntime {
@@ -75,7 +112,7 @@ impl AppState {
             hub_auth: Mutex::new(None),
             hub_auth_refresh: tokio::sync::Mutex::new(()),
             mcp: Mutex::new(None),
-            chat_turn_slot: std::sync::atomic::AtomicBool::new(false),
+            operation_slot: Mutex::new(None),
         })
     }
 
@@ -100,34 +137,50 @@ impl AppState {
         }
     }
 
-    pub fn try_begin_chat_turn(&self) -> bool {
-        self.chat_turn_slot
-            .compare_exchange(
-                false,
-                true,
-                std::sync::atomic::Ordering::SeqCst,
-                std::sync::atomic::Ordering::SeqCst,
-            )
-            .is_ok()
+    pub fn begin_operation(
+        self: &Arc<Self>,
+        kind: OperationKind,
+        owner: impl Into<String>,
+    ) -> AppResult<OperationGuard> {
+        let mut slot = self.operation_slot.lock();
+        if let Some(active) = slot.as_ref() {
+            return Err(crate::error::AppError::msg(format!(
+                "operation_busy: {} is already running for {}",
+                operation_kind_name(&active.status.kind),
+                active.status.owner
+            )));
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        *slot = Some(OperationLease {
+            id: id.clone(),
+            status: OperationStatus {
+                kind,
+                owner: owner.into(),
+                started_at: chrono::Utc::now().to_rfc3339(),
+            },
+        });
+        Ok(OperationGuard {
+            state: self.clone(),
+            id,
+        })
     }
 
-    pub fn chat_turn_running(&self) -> bool {
-        self.chat_turn_slot
-            .load(std::sync::atomic::Ordering::SeqCst)
+    pub fn operation_status(&self) -> Option<OperationStatus> {
+        self.operation_slot
+            .lock()
+            .as_ref()
+            .map(|lease| lease.status.clone())
     }
 
-    pub fn ensure_no_chat_turn(&self) -> crate::error::AppResult<()> {
-        if self.chat_turn_running() {
-            return Err(crate::error::AppError::msg(
-                "chat_turn_busy: a chat turn is running. Stop it before changing Claude settings, deleting chats, or switching the vault.",
-            ));
+    pub fn ensure_no_operation(&self) -> crate::error::AppResult<()> {
+        if let Some(active) = self.operation_status() {
+            return Err(crate::error::AppError::msg(format!(
+                "operation_busy: {} is running for {}",
+                operation_kind_name(&active.kind),
+                active.owner
+            )));
         }
         Ok(())
-    }
-
-    pub fn end_chat_turn(&self) {
-        self.chat_turn_slot
-            .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub fn vault_path(&self) -> PathBuf {
@@ -207,6 +260,17 @@ impl AppState {
     }
 }
 
+fn operation_kind_name(kind: &OperationKind) -> &'static str {
+    match kind {
+        OperationKind::ChatTurn => "chat_turn",
+        OperationKind::ConnectionProbe => "connection_probe",
+        OperationKind::SaveClaudeSettings => "save_claude_settings",
+        OperationKind::Reindex => "reindex",
+        OperationKind::VaultSwitch => "vault_switch",
+        OperationKind::DeleteSession => "delete_session",
+    }
+}
+
 /// Empty / whitespace `knowledge_dir` → default `{app_data}/vault`.
 pub fn resolve_knowledge_dir(app_data: &Path, knowledge_dir: &str) -> PathBuf {
     let trimmed = knowledge_dir.trim();
@@ -218,3 +282,36 @@ pub fn resolve_knowledge_dir(app_data: &Path, knowledge_dir: &str) -> PathBuf {
 }
 
 pub type SharedState = Arc<AppState>;
+
+#[cfg(test)]
+mod operation_tests {
+    use super::*;
+
+    fn state() -> SharedState {
+        Arc::new(
+            AppState::new(
+                std::env::temp_dir().join(format!("nest-operation-{}", uuid::Uuid::new_v4())),
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn operation_guard_is_exclusive_and_owner_aware() {
+        let state = state();
+        let guard = state
+            .begin_operation(OperationKind::ChatTurn, "session-a")
+            .unwrap();
+        let status = state.operation_status().unwrap();
+        assert_eq!(status.kind, OperationKind::ChatTurn);
+        assert_eq!(status.owner, "session-a");
+        assert!(state
+            .begin_operation(OperationKind::Reindex, "workspace")
+            .is_err());
+        drop(guard);
+        assert!(state.operation_status().is_none());
+        assert!(state
+            .begin_operation(OperationKind::Reindex, "workspace")
+            .is_ok());
+    }
+}

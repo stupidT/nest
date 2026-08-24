@@ -582,10 +582,19 @@ async fn call_tool_inner(
             .ok_or_else(|| KnowledgeError::new("invalid_input", "query is required"))?
             .to_string();
         let limit = args.get("limit").and_then(Value::as_u64).map(|v| v as u32);
-        let hits = crate::knowledge_workspace::KnowledgeWorkspace::search_turn(
+        let staged = {
+            let turn = server.active_turn.read();
+            let Some(active) = turn.as_ref() else {
+                return Err(KnowledgeError::new("permission_denied", "no active turn"));
+            };
+            let staged = active.workspace.read().staged_overlay();
+            staged
+        };
+        let hits = crate::knowledge_workspace::KnowledgeWorkspace::search_turn_with_overlay(
             &server.state,
             &query,
             limit,
+            &staged,
         )
         .await?;
         let citations = hits

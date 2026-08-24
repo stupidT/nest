@@ -1,7 +1,7 @@
 use crate::agent::{AgentChatRequest, AgentChatResult};
 use crate::chat_events::ChatStreamEvent;
 use crate::claude_cli::{self, ClaudeTurnRequest, TurnEvents, TurnMode};
-use crate::db::{self, ChatBackend, ChatBackendStatus, ChatSession};
+use crate::db::{self, BackendId, ChatBackendStatus, ChatSession};
 use crate::state::SharedState;
 use crate::vault;
 use std::path::{Path, PathBuf};
@@ -29,22 +29,28 @@ pub struct ChatRunResult {
     pub thinking: Option<String>,
     pub thinking_seconds: Option<f64>,
     pub file_changes: Vec<db::NewChatFileChange>,
-    pub backend: ChatBackend,
+    pub backend: BackendId,
     pub effective_model: Option<String>,
 }
 
 pub fn claude_mode_for(session: &ChatSession) -> Option<TurnMode> {
-    match (session.backend, session.backend_status) {
-        (Some(ChatBackend::Claude), ChatBackendStatus::Uninitialized) => Some(TurnMode::NewSession),
-        (Some(ChatBackend::Claude), ChatBackendStatus::Ready) => Some(TurnMode::Resume),
+    match (
+        session.backend.as_ref().map(BackendId::as_str),
+        session.backend_status,
+    ) {
+        (Some("claude"), ChatBackendStatus::Uninitialized) => Some(TurnMode::NewSession),
+        (Some("claude"), ChatBackendStatus::Ready) => Some(TurnMode::Resume),
         _ => None,
     }
 }
 
 pub async fn run_chat(request: ChatRunRequest) -> Result<ChatRunResult, crate::error::AppError> {
-    match request.session.backend {
-        Some(ChatBackend::Nest) => run_nest(request).await,
-        Some(ChatBackend::Claude) => run_claude(request).await,
+    match request.session.backend.as_ref().map(BackendId::as_str) {
+        Some("nest") => run_nest(request).await,
+        Some("claude") => run_claude(request).await,
+        Some(other) => Err(crate::error::AppError::msg(format!(
+            "unknown_backend: {other} is unavailable"
+        ))),
         None => Err(crate::error::AppError::msg(
             "chat_runtime: session backend is not bound",
         )),
@@ -88,7 +94,7 @@ async fn run_nest(request: ChatRunRequest) -> Result<ChatRunResult, crate::error
         thinking: result.thinking,
         thinking_seconds: result.thinking_seconds,
         file_changes: result.file_changes,
-        backend: ChatBackend::Nest,
+        backend: BackendId::nest(),
         effective_model: (!effective_model.trim().is_empty()).then_some(effective_model),
     })
 }
@@ -332,7 +338,7 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
         thinking: (!result.thinking.trim().is_empty()).then_some(result.thinking),
         thinking_seconds: None,
         file_changes,
-        backend: ChatBackend::Claude,
+        backend: BackendId::claude(),
         effective_model: result.model,
     })
 }
@@ -488,25 +494,25 @@ mod tests {
     #[test]
     fn claude_mode_follows_backend_status() {
         let uninitialized = db::ChatSession {
-            backend: Some(ChatBackend::Claude),
+            backend: Some(BackendId::claude()),
             backend_status: ChatBackendStatus::Uninitialized,
             ..test_session()
         };
         assert_eq!(claude_mode_for(&uninitialized), Some(TurnMode::NewSession));
         let ready = db::ChatSession {
-            backend: Some(ChatBackend::Claude),
+            backend: Some(BackendId::claude()),
             backend_status: ChatBackendStatus::Ready,
             ..test_session()
         };
         assert_eq!(claude_mode_for(&ready), Some(TurnMode::Resume));
         let unresumable = db::ChatSession {
-            backend: Some(ChatBackend::Claude),
+            backend: Some(BackendId::claude()),
             backend_status: ChatBackendStatus::Unresumable,
             ..test_session()
         };
         assert_eq!(claude_mode_for(&unresumable), None);
         let nest = db::ChatSession {
-            backend: Some(ChatBackend::Nest),
+            backend: Some(BackendId::nest()),
             backend_status: ChatBackendStatus::Ready,
             ..test_session()
         };

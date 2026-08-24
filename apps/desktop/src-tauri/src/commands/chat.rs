@@ -9,6 +9,13 @@ use tauri::AppHandle;
 use tauri::{Emitter, State};
 
 #[tauri::command]
+pub fn chat_backend_descriptors(
+    state: State<'_, SharedState>,
+) -> AppResult<Vec<crate::chat_backends::BackendDescriptor>> {
+    crate::chat_backends::descriptors(&state)
+}
+
+#[tauri::command]
 pub fn chat_create_session(
     state: State<'_, SharedState>,
     title: Option<String>,
@@ -54,8 +61,9 @@ pub fn chat_update_selection(
     expected_revision: u32,
     patch: ChatSelectionPatch,
 ) -> AppResult<ChatSession> {
+    state.ensure_no_operation()?;
     let backend = match patch.backend_id.as_deref() {
-        Some(value) => Some(db::ChatBackend::parse(value)?),
+        Some(value) => Some(db::BackendId::parse(value)?),
         None => None,
     };
     let model = match patch.model_kind.as_deref() {
@@ -65,6 +73,32 @@ pub fn chat_update_selection(
         )?),
         None => None,
     };
+    let current = {
+        let conn = state.db.lock();
+        db::get_session(&conn, &session_id)?.ok_or_else(|| {
+            crate::error::AppError::msg(format!("Session not found: {session_id}"))
+        })?
+    };
+    let desired_backend = backend
+        .clone()
+        .or(current.backend.clone())
+        .or_else(|| {
+            current
+                .selected_backend_id
+                .as_deref()
+                .and_then(|value| db::BackendId::parse(value).ok())
+        })
+        .unwrap_or_else(db::BackendId::nest);
+    let desired_model = model
+        .clone()
+        .unwrap_or_else(|| current.selected_model.clone());
+    let desired_mode = patch.mode.as_deref().unwrap_or(&current.mode);
+    crate::chat_backends::validate_selection(
+        &crate::chat_backends::descriptors(&state)?,
+        &desired_backend,
+        &desired_model,
+        desired_mode,
+    )?;
     let conn = state.db.lock();
     db::update_session_selection(
         &conn,
@@ -144,22 +178,41 @@ pub fn chat_review_file_change(
 }
 
 #[tauri::command]
-pub fn chat_delete_session(state: State<'_, SharedState>, session_id: String) -> AppResult<()> {
-    if state.chat_turn_running() {
-        let active_session = {
-            let conn = state.db.lock();
-            conn.query_row(
-                "SELECT session_id FROM chat_turns WHERE status = 'running' LIMIT 1",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .ok()
-        };
-        if active_session.as_deref() == Some(session_id.as_str()) {
-            return Err(crate::error::AppError::msg(
-                "chat_turn_busy: this chat is generating. Stop the current task before deleting it.",
-            ));
+pub async fn chat_delete_session(
+    state: State<'_, SharedState>,
+    session_id: String,
+) -> AppResult<()> {
+    let mut stopped_active_turn = false;
+    if let Some(operation) = state.operation_status() {
+        if operation.kind == crate::state::OperationKind::ChatTurn && operation.owner == session_id
+        {
+            state.request_chat_cancel();
+            tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                while state.operation_status().is_some() {
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+            })
+            .await
+            .map_err(|_| {
+                crate::error::AppError::msg(
+                    "chat_stop_timeout: the active Claude process did not stop in time",
+                )
+            })?;
+            stopped_active_turn = true;
+        } else {
+            return Err(crate::error::AppError::msg(format!(
+                "operation_busy: another operation is running for {}",
+                operation.owner
+            )));
         }
+    }
+    let _slot = state.inner().begin_operation(
+        crate::state::OperationKind::DeleteSession,
+        session_id.clone(),
+    )?;
+    if stopped_active_turn {
+        crate::vault_reconciliation::reconcile_vault(&state, std::time::Duration::from_secs(30))
+            .await?;
     }
     let conn = state.db.lock();
     db::delete_session(&conn, &session_id)
@@ -228,18 +281,9 @@ pub async fn chat_send(
     let focus = focus_paths.unwrap_or_default();
     let app_data_dir = state.app_data_dir.clone();
 
-    if !state.try_begin_chat_turn() {
-        return Err(crate::error::AppError::msg(
-            "chat_turn_busy: another chat turn is already running",
-        ));
-    }
-    let _turn_slot = TurnSlotGuard(state.inner().clone());
-    struct TurnSlotGuard(SharedState);
-    impl Drop for TurnSlotGuard {
-        fn drop(&mut self) {
-            self.0.end_chat_turn();
-        }
-    }
+    let _turn_slot = state
+        .inner()
+        .begin_operation(crate::state::OperationKind::ChatTurn, session_id.clone())?;
 
     let existing_session = {
         let conn = state.db.lock();
@@ -248,7 +292,24 @@ pub async fn chat_send(
         })?
     };
 
-    if existing_session.backend == Some(db::ChatBackend::Claude) {
+    let selected_backend = existing_session
+        .backend
+        .clone()
+        .or_else(|| {
+            existing_session
+                .selected_backend_id
+                .as_deref()
+                .and_then(|value| db::BackendId::parse(value).ok())
+        })
+        .unwrap_or_else(db::BackendId::nest);
+    crate::chat_backends::validate_selection(
+        &crate::chat_backends::descriptors(&state)?,
+        &selected_backend,
+        &existing_session.selected_model,
+        &existing_session.mode,
+    )?;
+
+    if existing_session.backend.as_ref().map(db::BackendId::as_str) == Some("claude") {
         if existing_session.backend_status == db::ChatBackendStatus::Unresumable {
             return Err(crate::error::AppError::msg(
                 "claude_session_unresumable: this Claude conversation can no longer be resumed; start a new chat",
@@ -280,7 +341,7 @@ pub async fn chat_send(
     };
     let session = prepared.session;
     let turn_id = prepared.turn_id.clone();
-    let turn_backend = prepared.backend;
+    let turn_backend = prepared.backend.clone();
     let turn_mode = prepared.mode.clone();
 
     let prior = {
@@ -396,7 +457,7 @@ pub async fn chat_send(
         },
     );
 
-    if turn_backend == db::ChatBackend::Nest {
+    if turn_backend.as_str() == "nest" {
         let state_clone = state.inner().clone();
         let sid = session_id.clone();
         let settings_for_title = settings.clone();
