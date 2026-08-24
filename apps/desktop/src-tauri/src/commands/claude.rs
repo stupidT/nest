@@ -9,6 +9,25 @@ use tauri::State;
 
 const MIN_CONNECTION_TIMEOUT: Duration = Duration::from_secs(120);
 
+struct ConnectionSlot(SharedState);
+
+impl ConnectionSlot {
+    fn acquire(state: SharedState) -> AppResult<Self> {
+        if !state.try_begin_chat_turn() {
+            return Err(AppError::msg(
+                "chat_turn_busy: another chat or connection operation is running",
+            ));
+        }
+        Ok(Self(state))
+    }
+}
+
+impl Drop for ConnectionSlot {
+    fn drop(&mut self) {
+        self.0.end_chat_turn();
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClaudeSettingsRequest {
@@ -108,6 +127,7 @@ pub async fn claude_test_connection(
     state: State<'_, SharedState>,
     cli_path: String,
 ) -> AppResult<ClaudeConnectionReport> {
+    let _slot = ConnectionSlot::acquire(state.inner().clone())?;
     let report = test_connection(&cli_path, &state).await;
     *state.claude_connection.lock() = Some(report.clone());
     Ok(report)
@@ -118,7 +138,7 @@ pub async fn claude_save_settings(
     state: State<'_, SharedState>,
     request: ClaudeSettingsRequest,
 ) -> AppResult<ClaudeConnectionReport> {
-    state.ensure_no_chat_turn()?;
+    let _slot = ConnectionSlot::acquire(state.inner().clone())?;
     {
         let conn = state.db.lock();
         db::save_claude_settings(

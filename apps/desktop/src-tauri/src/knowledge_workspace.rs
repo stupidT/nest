@@ -276,6 +276,18 @@ impl KnowledgeWorkspace {
                 files.push(path);
             }
         }
+        for (path, staged) in &self.staged {
+            if staged.current.is_none() {
+                files.retain(|listed| listed != path);
+                continue;
+            }
+            if roots.iter().any(|root| Path::new(path).starts_with(root))
+                && (filter.is_empty() || path.to_ascii_lowercase().contains(&filter))
+                && !files.contains(path)
+            {
+                files.push(path.clone());
+            }
+        }
         files.sort();
         let truncated = files.len() >= MAX_LISTED_FILES;
         files.truncate(MAX_LISTED_FILES);
@@ -728,6 +740,19 @@ mod tests {
             changes[0].old_content.as_deref(),
             Some("one\nDIRECT\nthree")
         );
+    }
+
+    #[test]
+    fn list_uses_turn_local_staged_files() {
+        let state = test_state_with_pack("list-pack", "existing.md", "old");
+        let mut workspace = KnowledgeWorkspace::open_turn(state, CapabilityMode::Agent, Vec::new());
+        workspace.create("list-pack/created.md", "created").unwrap();
+        workspace.delete("list-pack/existing.md").unwrap();
+
+        let listed = workspace.list(Some("list-pack")).unwrap().files;
+
+        assert!(listed.contains(&"list-pack/created.md".to_string()));
+        assert!(!listed.contains(&"list-pack/existing.md".to_string()));
     }
 
     fn test_state_with_pack(pack: &str, file: &str, content: &str) -> SharedState {

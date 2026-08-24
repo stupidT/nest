@@ -29,7 +29,16 @@ pub struct ActiveTurn {
     pub knowledge_available: bool,
     pub workspace: RwLock<KnowledgeWorkspace>,
     pub citations: RwLock<Vec<crate::db::Citation>>,
+    pub observations: RwLock<Vec<ToolObservation>>,
     pub tool_sequence: std::sync::atomic::AtomicI64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolObservation {
+    pub name: String,
+    pub target: Option<String>,
+    pub succeeded: bool,
+    pub output: String,
 }
 
 pub type ToolEventSink = Box<dyn Fn(&str, Option<&str>, bool) + Send + Sync>;
@@ -127,6 +136,7 @@ impl McpServerState {
                 protected_paths,
             )),
             citations: RwLock::new(Vec::new()),
+            observations: RwLock::new(Vec::new()),
             tool_sequence: std::sync::atomic::AtomicI64::new(0),
         });
         Ok(credential)
@@ -174,6 +184,14 @@ impl McpServerState {
                 let mut citations = active.citations.write();
                 std::mem::take(&mut *citations)
             }
+            None => Vec::new(),
+        }
+    }
+
+    pub fn take_tool_observations(&self) -> Vec<ToolObservation> {
+        let turn = self.active_turn.read();
+        match turn.as_ref() {
+            Some(active) => std::mem::take(&mut *active.observations.write()),
             None => Vec::new(),
         }
     }
@@ -490,6 +508,16 @@ async fn call_tool(
         "failed"
     };
     if let Some(turn) = server.active_turn.read().as_ref() {
+        let output = match &result {
+            Ok(value) => value,
+            Err(error) => &error.message,
+        };
+        turn.observations.write().push(ToolObservation {
+            name: name.to_string(),
+            target: target.clone(),
+            succeeded: result.is_ok(),
+            output: output.chars().take(4096).collect(),
+        });
         let sequence = turn
             .tool_sequence
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
