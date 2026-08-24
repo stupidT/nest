@@ -163,3 +163,28 @@ Step 2 完成时必须同时满足：
 - connection probe 能证明真实 Claude、MCP、Review/Apply、索引及清理全链路。
 - composer 和数据库不再硬编码具体 Agent，新增 Backend 可以通过 descriptor/adapter 接入。
 - Desktop UI 与 Rust 全量 sanity checks 通过，Windows 手工验收全部通过。
+
+## 10. 最终验收记录
+
+本节记录完成证据，不以单元测试替代真实 Windows Claude CLI 验收。
+
+### 10.1 自动化与文档
+
+- [x] Desktop UI：lint、126 个测试、production build（2026-08-24；5 条既有 warning，0 error）
+- [x] Desktop Rust：fmt、clippy（warnings as errors）、266 个测试（2026-08-24）
+- [x] `git diff --check` 与 `graphify update .`（2026-08-24；graphify 对合法 dynamic-import type 保留 1 条已知 TSX parser warning）
+- [x] 正式用户文档、开发文档和根 README 与实现一致
+- [ ] clean branch 仅包含 production code、tests 和正式 docs，不包含 `docs/_wip/**`
+
+### 10.2 Windows live acceptance
+
+- [x] §15.1 Save and connect：Claude CLI 2.1.238、`glm-5.3[1m]` 完成真实两轮六工具 probe；临时 Pack、Proposal 与索引残余均清理
+- [x] §15.2–4 三 capsule、默认继承、Ask/Agent、Nest MCP Proposal 审批前后磁盘边界
+- [x] §15.5–6 staged/native 非重叠 clean rebase 与重叠 conflict；冲突仅可 Reject，磁盘无 conflict markers
+- [x] §15.7–9 Sources 与 native activity 分离、原生修改 turn-end reconciliation、Stop 后 operation 释放并可继续会话
+- [x] §15.10 live Reindex operation/恢复；timeout 与 degraded capability gate 由故障注入自动化覆盖
+- [x] §15.11 active turn 期间 Settings/Vault/Reindex 门禁、删除 session 完整 Stop、强制退出后启动恢复且无 running operation
+- [x] §15.12 Ask strict / Agent open、reserved `nest` 与 external MCP source 由 CLI fixture 和持久化分类测试覆盖；验收机未配置可调用的用户 external MCP
+- [x] §15.13–15 Auto-detect 成功/失败反馈、Custom models 行编辑/规范化/持久化、`effective_model` 回流 Detected models 与 capsule
+
+实时验收创建的 `Step2-Acceptance-20260824` Pack 已先在 Nest 停用，再从开发 Vault 删除。故障注入和未配置外部依赖的场景明确记录为自动化证据，不伪装为人工调用结果。
