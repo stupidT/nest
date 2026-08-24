@@ -210,10 +210,16 @@ pub(crate) fn resolve_entry(
         Some("cjs") if file_name.eq_ignore_ascii_case("cli-wrapper.cjs") => {
             (path.to_path_buf(), build_node_target(path, path_env)?)
         }
-        Some("cmd") | Some("ps1") | None if file_stem_is_claude(path) => {
-            let wrapper = resolve_shim(path).ok_or_else(|| invalid_path(path))?;
-            (wrapper.clone(), build_node_target(&wrapper, path_env)?)
-        }
+        Some("cmd") | Some("ps1") | None if file_stem_is_claude(path) => match resolve_shim(path) {
+            Some(wrapper) => (wrapper.clone(), build_node_target(&wrapper, path_env)?),
+            None if !cfg!(windows) && path.extension().is_none() && is_native_binary(path) => (
+                path.to_path_buf(),
+                ClaudeLaunchTarget::Executable {
+                    executable: path.to_path_buf(),
+                },
+            ),
+            None => return Err(invalid_path(path)),
+        },
         _ => return Err(invalid_path(path)),
     };
     Ok(vec![candidate])
@@ -285,12 +291,42 @@ fn lexical_normalize(path: &Path) -> PathBuf {
 
 pub(crate) fn find_node_executable(hints: &[PathBuf], path_env: &str) -> Option<PathBuf> {
     for dir in hints.iter().chain(collect_search_dirs(path_env).iter()) {
-        let node = dir.join("node.exe");
-        if node.is_file() {
-            return Some(node);
+        for name in node_candidate_names() {
+            let node = dir.join(name);
+            if node.is_file() {
+                return Some(node);
+            }
         }
     }
     None
+}
+
+fn node_candidate_names() -> &'static [&'static str] {
+    if cfg!(windows) {
+        &["node.exe"]
+    } else {
+        &["node", "node.exe"]
+    }
+}
+
+fn is_native_binary(path: &Path) -> bool {
+    use std::io::Read as _;
+    let mut magic = [0u8; 4];
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    if file.read_exact(&mut magic).is_err() {
+        return false;
+    }
+    magic == [0x7f, b'E', b'L', b'F']
+        || matches!(
+            magic,
+            [0xfe, 0xed, 0xfa, 0xce]
+                | [0xfe, 0xed, 0xfa, 0xcf]
+                | [0xce, 0xfa, 0xed, 0xfe]
+                | [0xcf, 0xfa, 0xed, 0xfe]
+                | [0xca, 0xfe, 0xba, 0xbe]
+        )
 }
 
 fn node_hints(wrapper: &Path) -> Vec<PathBuf> {
@@ -343,6 +379,11 @@ pub(crate) fn find_auto_candidates(
                     if let Ok(target) = build_node_target(&wrapper, path_env) {
                         candidates.push((wrapper, target));
                     }
+                } else if !cfg!(windows) && shim_name == "claude" && is_native_binary(&shim) {
+                    candidates.push((
+                        shim.clone(),
+                        ClaudeLaunchTarget::Executable { executable: shim },
+                    ));
                 }
             }
         }
@@ -362,7 +403,11 @@ fn build_node_target(wrapper: &Path, path_env: &str) -> Result<ClaudeLaunchTarge
     let node = find_node_executable(&node_hints(wrapper), path_env).ok_or_else(|| {
         ClaudeError::new(
             ClaudeErrorCode::NodeNotFound,
-            format!("node.exe is required to launch {}", wrapper.display()),
+            format!(
+                "{} is required to launch {}",
+                node_candidate_names()[0],
+                wrapper.display()
+            ),
         )
     })?;
     Ok(ClaudeLaunchTarget::NodeScript {
@@ -1693,6 +1738,7 @@ mod resolver_tests {
 
     #[cfg(windows)]
     #[test]
+    #[cfg(windows)]
     fn shim_content_fallback_when_layout_is_unusual() {
         let fx = Fixture::new("shim-content");
         let wrapper = fx.touch("elsewhere/@anthropic-ai/claude-code/cli-wrapper.cjs");
@@ -1843,11 +1889,21 @@ mod resolver_tests {
 
     #[cfg(windows)]
     #[test]
+    #[cfg(windows)]
     fn path_env_splits_into_directories() {
         let dirs = collect_search_dirs("C:\\a\\bin;D:\\tools;;C:\\b");
         assert_eq!(dirs.len(), 3);
         assert_eq!(dirs[0], PathBuf::from("C:\\a\\bin"));
         assert_eq!(dirs[2], PathBuf::from("C:\\b"));
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn path_env_splits_into_directories() {
+        let dirs = collect_search_dirs("/a/bin:/tools::/b");
+        assert_eq!(dirs.len(), 3);
+        assert_eq!(dirs[0], PathBuf::from("/a/bin"));
+        assert_eq!(dirs[2], PathBuf::from("/b"));
     }
 
     #[test]
@@ -1923,6 +1979,49 @@ mod resolver_tests {
     fn auto_detection_failure_is_invalid_path() {
         let err = detections_from_candidates(Vec::new()).unwrap_err();
         assert_eq!(err.code(), ClaudeErrorCode::InvalidCliPath);
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn node_without_exe_suffix_resolves_in_search_dirs() {
+        let fx = Fixture::new("node-unix");
+        let dir = fx.root.join("tools");
+        let node = fx.touch("tools/node");
+        assert_eq!(find_node_executable(&[dir], ""), Some(node));
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn native_claude_symlink_on_path_is_an_executable_candidate() {
+        let fx = Fixture::new("native-symlink");
+        let target = fx.file("pkg/bin/claude.exe");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, [0x7f, b'E', b'L', b'F', 2, 0, 1, 0]).unwrap();
+        let bin = fx.root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::os::unix::fs::symlink(&target, bin.join("claude")).unwrap();
+        let candidates = find_auto_candidates(std::slice::from_ref(&bin), &[], "");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].0, bin.join("claude"));
+        assert!(matches!(
+            candidates[0].1,
+            ClaudeLaunchTarget::Executable { .. }
+        ));
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn extensionless_native_claude_entry_resolves_as_executable() {
+        let fx = Fixture::new("native-entry");
+        let claude = fx.file("bin/claude");
+        std::fs::create_dir_all(claude.parent().unwrap()).unwrap();
+        std::fs::write(&claude, [0x7f, b'E', b'L', b'F', 2, 0, 1, 0]).unwrap();
+        let candidates = resolve_entry(&claude, "").unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].1,
+            ClaudeLaunchTarget::Executable { executable: claude }
+        );
     }
 }
 
@@ -2433,12 +2532,7 @@ mod process_tests {
 
     fn which_node() -> PathBuf {
         let path_env = std::env::var("PATH").unwrap_or_default();
-        let executable = if cfg!(windows) { "node.exe" } else { "node" };
-        let node = collect_search_dirs(&path_env)
-            .into_iter()
-            .map(|dir| dir.join(executable))
-            .find(|node| node.is_file());
-        node.expect("Node.js must be available for process tests")
+        find_node_executable(&[], &path_env).expect("node must be available for process tests")
     }
 
     async fn run(
