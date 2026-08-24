@@ -132,6 +132,8 @@ const messages: Record<Locale, MessageTree> = {
         customModels: "Custom models",
         customModelsDescription:
           "One model ID per row. Used by the model selector in chat.",
+        customModelsHint:
+          "Optional — the default model appears here automatically after a connection test",
         addModel: "Add model",
         modelRowLabel: "Model {{index}}",
         removeModelRow: "Remove model {{index}}",

@@ -85,7 +85,11 @@ export function ClaudeModelsEditor({
                 aria-label={t("settings.claude.modelRowLabel", {
                   index: index + 1,
                 })}
-                placeholder="glm-5.3"
+                placeholder={
+                  defaultModel.trim() === ""
+                    ? t("settings.claude.customModelsHint")
+                    : ""
+                }
                 className="font-mono text-xs"
               />
               {duplicate && (

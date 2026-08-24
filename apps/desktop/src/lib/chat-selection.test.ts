@@ -58,6 +58,29 @@ describe("deriveCapsules", () => {
     expect(active.backends[1].disabledReason).toBe("disabled");
   });
 
+  it("hides enabled but disconnected backends unless they are active", () => {
+    const disconnected = descriptor("claude", {
+      availability: "unavailable",
+      reason_code: "connection_unverified",
+    });
+    const capsules = deriveCapsules({
+      descriptors: [descriptor("nest"), disconnected],
+      activeBackendId: "nest",
+      boundBackend: null,
+    });
+    expect(capsules.backends.map((backend) => backend.id)).toEqual(["nest"]);
+    const bound = deriveCapsules({
+      descriptors: [descriptor("nest"), disconnected],
+      activeBackendId: "claude",
+      boundBackend: "claude",
+    });
+    expect(bound.backends.map((backend) => backend.id)).toEqual([
+      "nest",
+      "claude",
+    ]);
+    expect(bound.backends[1].disabled).toBe(true);
+  });
+
   it("derives model and mode capsules entirely from the active descriptor", () => {
     const claude = descriptor("claude", {
       models: [

@@ -11,6 +11,7 @@ pub struct ProbeOutcome {
     pub failures: Vec<String>,
     pub cleanup_warnings: Vec<String>,
     pub effective_model: String,
+    pub cli_version: String,
 }
 
 pub type SinkBuilder = Box<dyn FnOnce() -> ToolEventSink + Send>;
@@ -289,10 +290,16 @@ async fn run_claude_driven_probe(
 
     let mut failures = Vec::new();
 
-    let mut effective_model = turn1
-        .ok()
-        .and_then(|result| result.model)
-        .unwrap_or_default();
+    let mut effective_model = String::new();
+    let mut cli_version = String::new();
+    if let Ok(result) = &turn1 {
+        if let Some(model) = &result.model {
+            effective_model = model.clone();
+        }
+        if let Some(version) = &result.cli_version {
+            cli_version = version.clone();
+        }
+    }
 
     let observations1 = server.take_tool_observations();
     let staged1 = match server.finish_staged() {
@@ -467,6 +474,9 @@ async fn run_claude_driven_probe(
             if let Some(model) = result.model {
                 effective_model = model;
             }
+            if let Some(version) = result.cli_version {
+                cli_version = version;
+            }
         }
     }
 
@@ -609,6 +619,7 @@ async fn run_claude_driven_probe(
         failures,
         cleanup_warnings,
         effective_model,
+        cli_version,
     }
 }
 

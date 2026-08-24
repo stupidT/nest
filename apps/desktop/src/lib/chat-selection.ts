@@ -42,15 +42,16 @@ export function deriveCapsules(params: {
   const active = params.descriptors.find(
     (descriptor) => descriptor.id === params.activeBackendId,
   );
+  const usable = (descriptor: BackendDescriptor) =>
+    descriptor.enabled &&
+    (descriptor.availability === "ready" ||
+      descriptor.availability === "last_verified");
   const backends = params.descriptors
     .filter(
-      (descriptor) =>
-        descriptor.enabled || descriptor.id === params.activeBackendId,
+      (descriptor) => usable(descriptor) || descriptor.id === params.activeBackendId,
     )
     .map((descriptor) => {
-      const disabled =
-        descriptor.availability !== "ready" &&
-        descriptor.availability !== "last_verified";
+      const disabled = !usable(descriptor);
       return {
         id: descriptor.id,
         label: descriptor.label,

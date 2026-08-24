@@ -277,6 +277,8 @@ Composer 内依次显示三个胶囊：Agent、Model、Mode。点击任一胶囊
 
 全局 disabled 的 Backend 不出现；enabled 但 unavailable 的 Backend 以禁用项保留，展示不可用原因和 Settings 入口。选择其他 Backend 时按 D22 创建新 session 并携带未发送草稿。
 
+2026-08 修订：Agent 胶囊在 Backend Binding 后直接锁定（disabled + tooltip），不再提供"切换即新建 session"路径；需要换 Backend 时用户显式 New chat。Backend 下拉只显示可用后端（enabled 且 ready/last_verified）；当前绑定的后端即使变为 unavailable 也保留显示为禁用项。未绑定 session 继承的 Backend Selection 若已不可用（disabled/断连），自动回退为 Nest，保证全新 chat 总是可用。Composer 被 gate 阻塞时输入框一并禁用，而不仅是提示。
+
 ### D28. Message model label
 
 每条 assistant message 显示轻量 effective-model 标签。requested 与 effective 不一致时，tooltip 同时展示两者；历史标签来自消息元数据，不随 session 当前选择变化。

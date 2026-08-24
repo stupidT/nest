@@ -244,29 +244,18 @@ async fn test_connection(cli_path: &str, state: &SharedState) -> ClaudeConnectio
         Some(std::path::PathBuf::from(trimmed))
     };
     let detections = match claude_cli::detect_cli(configured.as_deref()) {
-        Ok(detections) => detections,
-        Err(error) => return unavailable_report(trimmed, &error.to_string()),
+        Ok(detections) if !detections.is_empty() => detections,
+        _ => return unavailable_report(trimmed, "no Claude CLI candidate found"),
     };
-
-    for detection in &detections {
-        match claude_cli::probe_version(detection, claude_cli::PROBE_VERSION_TIMEOUT).await {
-            ProbeOutcome::Version(version) => {
-                if let Some(report) = full_tool_probe(detection, &version, trimmed, state).await {
-                    return report;
-                }
-            }
-            ProbeOutcome::Failed(_) => continue,
-        }
-    }
-    unavailable_report(trimmed, "no CLI candidate completed the connection test")
+    let detection = detections[0].clone();
+    full_tool_probe(&detection, trimmed, state).await
 }
 
 async fn full_tool_probe(
     detection: &ClaudeDetection,
-    cli_version: &str,
     configured_path: &str,
     state: &SharedState,
-) -> Option<ClaudeConnectionReport> {
+) -> ClaudeConnectionReport {
     let probe = crate::connection_probe::run_six_tool_probe(
         state.clone(),
         None,
@@ -274,29 +263,29 @@ async fn full_tool_probe(
     )
     .await;
     if !probe.failures.is_empty() {
-        return Some(unavailable_report(
+        return unavailable_report(
             configured_path,
             &format!("nest tool probe failed: {}", probe.failures.join("; ")),
-        ));
+        );
     }
     if !probe.cleanup_warnings.is_empty() {
-        return Some(unavailable_report(
+        return unavailable_report(
             configured_path,
             &format!(
                 "nest tool probe left residue: {}",
                 probe.cleanup_warnings.join("; ")
             ),
-        ));
+        );
     }
-    Some(ClaudeConnectionReport {
+    ClaudeConnectionReport {
         status: ClaudeConnectionStatus::Connected,
         configured_cli_path: configured_path.to_string(),
         resolved_cli_path: detection.resolved_path.clone(),
-        cli_version: cli_version.to_string(),
+        cli_version: probe.cli_version,
         effective_model: probe.effective_model,
         tested_at: Utc::now().to_rfc3339(),
         message: None,
-    })
+    }
 }
 
 fn unavailable_report(cli_path: &str, message: &str) -> ClaudeConnectionReport {

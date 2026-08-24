@@ -89,6 +89,8 @@ describe("SettingsPanel with live settings data", () => {
   it("renders the Claude section with connected data", () => {
     const { container } = renderPanel();
     expect(container.innerHTML).toContain("Claude Agent");
-    expect(container.innerHTML).toContain("glm-5.3");
+    expect(container.innerHTML).toContain(
+      "the default model appears here automatically",
+    );
   });
 });

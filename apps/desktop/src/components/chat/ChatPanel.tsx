@@ -67,13 +67,6 @@ export function ChatPanel() {
   const [chatError, setChatError] = useState<string | null>(null);
   const [isStopping, setIsStopping] = useState(false);
   const [completedTurn, setCompletedTurn] = useState(0);
-  const [pendingDraft, setPendingDraft] = useState<{
-    text: string;
-    refs: MentionRef[];
-  } | null>(null);
-  const composerDraftRef = useRef<{ text: string; refs: MentionRef[] } | null>(
-    null,
-  );
 
   const isGeneratingHere = isSending && pendingSessionId === sessionId;
 
@@ -193,47 +186,9 @@ export function ChatPanel() {
       modelValue?: string | null;
       mode?: ChatMode;
     },
-    previousState: { text: string; refs: MentionRef[] } | null = null,
   ) => {
     if (!sessionId || isSending) return;
     const revision = currentSession?.selection_revision ?? 0;
-    if (patch.backendId && currentSession?.backend != null) {
-      const draft = previousState ?? null;
-      void api
-        .chatCreateSession("New chat")
-        .then((created) => {
-          const createdRevision = created.selection_revision;
-          return api
-            .chatUpdateSelection(
-              created.id,
-              createdRevision,
-              patch.backendId
-                ? {
-                    backendId: patch.backendId,
-                    modelKind: patch.modelKind,
-                    modelValue: patch.modelValue,
-                    mode: patch.mode,
-                  }
-                : patch,
-            )
-            .then((updated) => {
-              queryClient.setQueryData<ChatSession[]>(
-                queryKeys.chatSessions,
-                (current) => [updated, ...(current ?? [])],
-              );
-              openChatTab(updated.id);
-              if (draft) {
-                setPendingDraft(draft);
-              }
-            });
-        })
-        .catch((e: unknown) =>
-          setStatusMessage(
-            appErrorMessage(e, "Could not start a new chat"),
-          ),
-        );
-      return;
-    }
     void api
       .chatUpdateSelection(sessionId, revision, patch)
       .then((updated) => {
@@ -267,19 +222,7 @@ export function ChatPanel() {
 
   const changeBackend = (backendId: string) => {
     if (backendId === activeBackendId) return;
-    if (currentSession?.backend != null) {
-      applySelection(
-        {
-          backendId,
-          modelKind: "default",
-          modelValue: null,
-        },
-        composerDraftRef.current
-          ? { text: composerDraftRef.current.text, refs: composerDraftRef.current.refs }
-          : null,
-      );
-      return;
-    }
+    if (currentSession?.backend != null) return;
     applySelection({
       backendId,
       modelKind: "default",
@@ -321,6 +264,26 @@ export function ChatPanel() {
     currentSession ? { backend: currentSession.backend, backend_status: currentSession.backend_status } : null,
     claudeStatus,
   );
+
+  // An unbound session inherits the most recent backend selection, but that
+  // backend may have become disabled or disconnected since. Fall the
+  // provisional selection back to Nest so a fresh chat is always usable.
+  useEffect(() => {
+    if (!descriptorsQuery.data || !currentSession || currentSession.backend != null) {
+      return;
+    }
+    const descriptor = descriptorsQuery.data.find(
+      (candidate) => candidate.id === activeBackendId,
+    );
+    const usable =
+      descriptor != null &&
+      descriptor.enabled &&
+      (descriptor.availability === "ready" ||
+        descriptor.availability === "last_verified");
+    if (!usable && activeBackendId !== "nest") {
+      applySelection({ backendId: "nest", modelKind: "default", modelValue: null });
+    }
+  }, [descriptorsQuery.data, currentSession, activeBackendId]);
 
   const reconnectClaude = useMutation({
     mutationFn: () => {
@@ -847,11 +810,7 @@ export function ChatPanel() {
           canChangeBackend={capsules.canChangeBackend}
           onBackendChange={changeBackend}
           onModelChange={changeModel}
-          draft={pendingDraft}
-          onDraftConsumed={() => setPendingDraft(null)}
-          onDraftChange={(draft) => {
-            composerDraftRef.current = draft;
-          }}
+          blocked={!!composerBlocked}
           onStop={() => {
             if (isStopping) return;
             setIsStopping(true);

@@ -27,6 +27,7 @@ type Props = {
   candidates: Candidate[];
   isGenerating?: boolean;
   controlsDisabled?: boolean;
+  blocked?: boolean;
   onSend: (text: string, focusPaths: string[]) => void;
   onStop?: () => void;
   canSend: boolean;
@@ -49,6 +50,7 @@ export function MentionComposer({
   candidates,
   isGenerating = false,
   controlsDisabled = false,
+  blocked = false,
   onSend,
   onStop,
   canSend,
@@ -266,7 +268,7 @@ export function MentionComposer({
           <CapsuleSelect
             ariaLabel="Chat agent"
             value={activeBackendId}
-            disabled={isGenerating || controlsDisabled}
+            disabled={isGenerating || controlsDisabled || !canChangeBackend}
             onChange={onBackendChange}
             options={backends.map((b) => ({
               value: b.id,
@@ -277,7 +279,7 @@ export function MentionComposer({
             lockedTitle={
               canChangeBackend
                 ? undefined
-                : "Backend is bound to this chat. Switching creates a new chat."
+                : "Agent is fixed once the chat has started."
             }
           />
           <CapsuleSelect
@@ -319,7 +321,7 @@ export function MentionComposer({
           <textarea
             ref={textareaRef}
             value={text}
-            disabled={isGenerating || controlsDisabled}
+            disabled={isGenerating || controlsDisabled || blocked}
             placeholder={mode === "agent" ? "Describe a change…" : "Ask anything…"}
             rows={2}
             className="relative block w-full resize-none bg-transparent pr-8 text-sm leading-5 text-transparent caret-foreground outline-none selection:bg-primary/20 selection:text-foreground placeholder:text-muted-foreground"
