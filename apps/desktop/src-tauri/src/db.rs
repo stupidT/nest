@@ -2220,7 +2220,7 @@ pub fn get_pending_chat_file_change_for_path(
     conn.query_row(
         "SELECT id, path, operation, status, old_content, new_content, rebase_count, last_rebased_at, resolution_reason
          FROM chat_file_changes
-         WHERE path = ?1 AND status = 'pending'
+         WHERE path = ?1 AND status IN ('pending', 'conflicted')
          ORDER BY rowid DESC LIMIT 1",
         params![path],
         |row| {
@@ -3170,6 +3170,9 @@ mod sync_state_tests {
         assert_eq!(detail.status, "conflicted");
         assert_eq!(detail.rebase_count, 1);
         assert_eq!(detail.resolution_reason.as_deref(), Some("overlap"));
+        let reviewable =
+            get_pending_chat_file_change_for_path(&conn, "sample/conflict.md").unwrap();
+        assert_eq!(reviewable.unwrap().status, "conflicted");
     }
 
     #[test]
