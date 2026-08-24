@@ -150,7 +150,7 @@ impl McpServerState {
         self.active_turn.read().is_some()
     }
 
-    pub fn record_native_activity(&self, name: &str, target: Option<&str>) {
+    pub fn record_non_nest_activity(&self, name: &str, target: Option<&str>) {
         let turn = self.active_turn.read();
         if let Some(active) = turn.as_ref() {
             let sequence = active
@@ -161,7 +161,7 @@ impl McpServerState {
                 &conn,
                 &active.turn_id,
                 sequence,
-                "claude_native",
+                crate::chat_runtime::tool_source_for(name),
                 crate::chat_runtime::tool_kind_for(name),
                 name,
                 target,

@@ -222,7 +222,7 @@ async fn run_claude(request: ChatRunRequest) -> Result<ChatRunResult, crate::err
                     done: false,
                 },
             );
-            server_for_tools.record_native_activity(name, target);
+            server_for_tools.record_non_nest_activity(name, target);
         }),
         initialized: Box::new(move |session_id, _model, _version| {
             let conn = state_for_init.db.lock();
@@ -394,6 +394,16 @@ pub fn tool_kind_for(name: &str) -> &'static str {
         "knowledge_replace" => "knowledge_stage",
         "knowledge_delete" => "knowledge_stage",
         _ => "external_tool",
+    }
+}
+
+pub fn tool_source_for(name: &str) -> &'static str {
+    if name.starts_with("mcp__nest__") {
+        "nest_mcp"
+    } else if name.starts_with("mcp__") {
+        "external_mcp"
+    } else {
+        "claude_native"
     }
 }
 
@@ -618,6 +628,13 @@ mod tests {
                 exit_ok: true,
             }
         ));
+    }
+
+    #[test]
+    fn tool_source_distinguishes_external_mcp_from_native_tools() {
+        assert_eq!(tool_source_for("Bash"), "claude_native");
+        assert_eq!(tool_source_for("mcp__github__search_code"), "external_mcp");
+        assert_eq!(tool_source_for("mcp__nest__knowledge_read"), "nest_mcp");
     }
 
     fn test_session() -> db::ChatSession {
