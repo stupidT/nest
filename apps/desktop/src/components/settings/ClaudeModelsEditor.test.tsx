@@ -116,12 +116,12 @@ describe("ClaudeModelsEditor", () => {
     expect(onTestRow).toHaveBeenCalledWith(0);
   });
 
-  it("shows testing and result states per row", () => {
+  it("shows testing and result states per row keyed by model id", () => {
     const { rerender } = render(
       <I18nProvider locale="en">
         <ClaudeModelsEditor
           rows={["glm-5.3", "kimi"]}
-          rowStatuses={{ 0: "testing", 1: "ok" }}
+          rowStatuses={{ "glm-5.3": "testing", kimi: "ok" }}
           onTestRow={() => {}}
           onChange={() => {}}
         />
@@ -135,8 +135,8 @@ describe("ClaudeModelsEditor", () => {
         <ClaudeModelsEditor
           rows={["glm-5.3", "kimi"]}
           rowStatuses={{
-            0: { message: "boom" },
-            1: "ok",
+            "glm-5.3": { message: "boom" },
+            kimi: "ok",
           }}
           onTestRow={() => {}}
           onChange={() => {}}

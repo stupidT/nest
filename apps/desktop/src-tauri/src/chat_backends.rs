@@ -195,6 +195,9 @@ fn claude_descriptor(
         .map(|report| report.effective_model.trim())
         .filter(|model| !model.is_empty())
         .unwrap_or("CLI Default");
+    let default_model_id = report
+        .map(|report| report.effective_model.trim().to_string())
+        .filter(|model| !model.is_empty());
     let mut models = vec![ModelDescriptor {
         selection: ModelSelection::default(),
         label: format!("{default_label} (default)"),
@@ -204,6 +207,7 @@ fn claude_descriptor(
         db::claude_model_options(observed_models, &settings.claude_custom_models)
             .into_iter()
             .filter(|option| option.source.as_str() != "default")
+            .filter(|option| default_model_id.as_deref() != Some(option.model_id.as_str()))
             .map(|option| ModelDescriptor {
                 selection: ModelSelection {
                     kind: ModelSelectionKind::Explicit,
@@ -303,6 +307,43 @@ mod tests {
         let mut enabled = descriptor;
         enabled.modes[0].available = true;
         assert!(validate_selection(&[enabled], &backend, &explicit, "ask").is_err());
+    }
+
+    #[test]
+    fn descriptor_dedupes_default_model_against_explicit_options() {
+        let state = state();
+        let report = db::ClaudeConnectionReport {
+            status: db::ClaudeConnectionStatus::Connected,
+            configured_cli_path: "C:\\claude\\claude.exe".to_string(),
+            resolved_cli_path: String::new(),
+            cli_version: String::new(),
+            effective_model: "glm-5.3".to_string(),
+            tested_at: String::new(),
+            message: None,
+        };
+        {
+            let conn = state.db.lock();
+            db::save_claude_connection_report(&conn, &report).unwrap();
+            db::save_claude_settings(&conn, true, "C:\\claude\\claude.exe", "glm-5.3\nkimi")
+                .unwrap();
+        }
+        let (settings, observed, persisted) = {
+            let conn = state.db.lock();
+            (
+                db::get_settings(&conn).unwrap(),
+                db::observed_claude_models(&conn, "C:\\claude\\claude.exe").unwrap(),
+                db::load_claude_connection_report(&conn),
+            )
+        };
+        let descriptor = claude_descriptor(&state, &settings, &observed, persisted.as_ref());
+        let explicit: Vec<String> = descriptor
+            .models
+            .iter()
+            .filter(|model| model.selection.kind == ModelSelectionKind::Explicit)
+            .map(|model| model.selection.value.clone().unwrap_or_default())
+            .collect();
+        assert_eq!(explicit, vec!["kimi".to_string()]);
+        assert!(descriptor.models[0].label.starts_with("glm-5.3"));
     }
 
     #[test]

@@ -18,7 +18,7 @@ import { queryKeys } from "@/lib/query-keys";
 import { cn } from "@/lib/utils";
 import {
   ClaudeModelsEditor,
-  type ModelRowStatus,
+  type ModelRowStatuses,
 } from "./ClaudeModelsEditor";
 import { parseModelRows, serializeModelRows } from "./model-rows";
 import { GeneralGroup } from "./GeneralGroup";
@@ -47,10 +47,8 @@ function useClaudeAgentSettings(settingsQuery: {
   const [stale, setStale] = useState(false);
   const [detection, setDetection] = useState<ClaudeDetectionDto | null>(null);
   const [detectFailed, setDetectFailed] = useState(false);
-  const [rowStatuses, setRowStatuses] = useState<
-    Record<number, ModelRowStatus | { message: string | null }>
-  >({});
-  const [testingRow, setTestingRow] = useState<number | null>(null);
+  const [rowStatuses, setRowStatuses] = useState<ModelRowStatuses>({});
+  const [testingModel, setTestingModel] = useState<string | null>(null);
 
   useEffect(() => {
     if (!settingsQuery.data || hydrated) return;
@@ -99,7 +97,13 @@ function useClaudeAgentSettings(settingsQuery: {
       setTestResult(report);
       setDetectFailed(false);
       void queryClient.invalidateQueries({
+        queryKey: queryKeys.claudeConnection,
+      });
+      void queryClient.invalidateQueries({
         queryKey: queryKeys.claudeModelOptions,
+      });
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.chatBackendDescriptors,
       });
     },
     onError: (e: unknown) => {
@@ -118,34 +122,26 @@ function useClaudeAgentSettings(settingsQuery: {
       model: string;
     }) => api.claudeTestModel(cliPath, model),
     onMutate: ({ model }) => {
-      const index = modelRows.findIndex((row) => row.trim() === model.trim());
-      if (index >= 0) setTestingRow(index);
+      setTestingModel(model.trim());
     },
     onSuccess: (result) => {
-      const index = modelRows.findIndex(
-        (row) => row.trim() === result.model.trim(),
-      );
-      setTestingRow(null);
-      if (index < 0) return;
+      setTestingModel(null);
+      const key = result.model.trim();
+      if (!key) return;
       setRowStatuses((current) => ({
         ...current,
-        [index]: result.ok
+        [key]: result.ok
           ? "ok"
-          : {
-              message:
-                result.message ??
-                result.effective_model ??
-                "model test failed",
-            },
+          : { message: result.message ?? "model test failed" },
       }));
     },
     onError: (e: unknown, { model }) => {
-      const index = modelRows.findIndex((row) => row.trim() === model.trim());
-      setTestingRow(null);
-      if (index < 0) return;
+      setTestingModel(null);
+      const key = model.trim();
+      if (!key) return;
       setRowStatuses((current) => ({
         ...current,
-        [index]: {
+        [key]: {
           message: e instanceof Error ? e.message : String(e),
         },
       }));
@@ -225,9 +221,8 @@ function useClaudeAgentSettings(settingsQuery: {
     detect,
     test,
     testModel,
-    testingRow,
+    testingModel,
     rowStatuses,
-    setRowStatuses,
     save,
     dirty,
     markDirty,
@@ -254,9 +249,8 @@ export function ClaudeAgentSettingsSection({
     detect,
     test,
     testModel,
-    testingRow,
+    testingModel,
     rowStatuses,
-    setRowStatuses,
     save,
     dirty,
     markDirty,
@@ -272,6 +266,11 @@ export function ClaudeAgentSettingsSection({
   const reportConnected =
     displayReport?.status === "connected" ||
     displayReport?.status === "last_connected";
+  const featureDisabled = !draft.enabled;
+  const mergedRowStatuses =
+    testingModel != null
+      ? { ...rowStatuses, [testingModel]: "testing" as const }
+      : rowStatuses;
 
   return (
     <GeneralGroup
@@ -347,7 +346,7 @@ export function ClaudeAgentSettingsSection({
                 ? t("settings.claude.detectionFailedPlaceholder")
                 : "claude.exe · cli-wrapper.cjs · empty = auto-detect"
             }
-            disabled={detect.isPending}
+            disabled={featureDisabled || detect.isPending}
             className={cn(
               "min-w-0 flex-1 font-mono text-xs",
               detectFailed && !draft.cliPath.trim() && "border-destructive",
@@ -357,7 +356,7 @@ export function ClaudeAgentSettingsSection({
             type="button"
             variant="outline"
             className="shrink-0"
-            disabled={detect.isPending}
+            disabled={featureDisabled || detect.isPending}
             onClick={() => detect.mutate()}
           >
             {detect.isPending && (
@@ -393,7 +392,7 @@ export function ClaudeAgentSettingsSection({
             type="button"
             size="sm"
             variant="outline"
-            disabled={test.isPending}
+            disabled={featureDisabled || test.isPending}
             onClick={() => test.mutate()}
           >
             {test.isPending && (
@@ -450,13 +449,9 @@ export function ClaudeAgentSettingsSection({
       >
         <ClaudeModelsEditor
           rows={modelRows}
-          disabled={save.isPending}
+          disabled={featureDisabled || save.isPending}
           defaultModel={defaultModel}
-          rowStatuses={
-            testingRow != null
-              ? { ...rowStatuses, [testingRow]: "testing" }
-              : rowStatuses
-          }
+          rowStatuses={mergedRowStatuses}
           onTestRow={(index) => {
             const model = modelRows[index]?.trim();
             if (!model) return;
@@ -464,7 +459,6 @@ export function ClaudeAgentSettingsSection({
           }}
           onChange={(rows) => {
             setModelRows(rows);
-            setRowStatuses({});
             markDirty();
           }}
         />
