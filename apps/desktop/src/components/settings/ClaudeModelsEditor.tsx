@@ -1,19 +1,30 @@
-import { Plus, X } from "lucide-react";
+import { CheckCircle2, LoaderCircle, Plus, X, XCircle } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useI18n } from "@/lib/i18n";
+import { cn } from "@/lib/utils";
 import { isDuplicateRow } from "./model-rows";
+
+export type ModelRowStatus = "idle" | "testing" | "ok" | "fail";
+
+export type ModelRowFailure = {
+  message: string | null;
+};
 
 export function ClaudeModelsEditor({
   rows,
   disabled = false,
   defaultModel = "",
+  rowStatuses,
+  onTestRow,
   onChange,
 }: {
   rows: string[];
   disabled?: boolean;
   defaultModel?: string;
+  rowStatuses?: Record<number, ModelRowStatus | ModelRowFailure>;
+  onTestRow?: (index: number) => void;
   onChange: (rows: string[]) => void;
 }) {
   const { t } = useI18n();
@@ -46,72 +57,60 @@ export function ClaudeModelsEditor({
     shouldFocusNewRow.current = true;
   };
 
+  const statusOf = (index: number): ModelRowStatus => {
+    const status = rowStatuses?.[index];
+    if (status == null) return "idle";
+    if (typeof status === "string") return status;
+    return "fail";
+  };
+
+  const failureOf = (index: number): string | null => {
+    const status = rowStatuses?.[index];
+    if (status == null || typeof status === "string") return null;
+    return status.message;
+  };
+
   return (
     <div className="space-y-2">
       {defaultModel.trim() !== "" && (
-        <div className="flex items-center gap-2">
-          <div className="min-w-0 flex-1">
-            <Input
-              value={defaultModel}
-              disabled
-              readOnly
-              aria-label={t("settings.claude.defaultModelLabel")}
-              className="font-mono text-xs"
-            />
-          </div>
-          <span className="shrink-0 rounded-md border bg-muted/40 px-2 py-1 font-mono text-xs text-muted-foreground">
-            {t("settings.claude.defaultModelBadge")}
-          </span>
-        </div>
+        <ModelRow
+          label={t("settings.claude.defaultModelLabel")}
+          value={defaultModel}
+          badge={t("settings.claude.defaultModelBadge")}
+          disabled
+          status="ok"
+        />
       )}
       {rows.map((row, index) => {
         const duplicate = isDuplicateRow(rows, index);
         return (
-          <div key={index} className="flex items-start gap-2">
-            <div className="min-w-0 flex-1 space-y-1">
-              <Input
-                ref={index === rows.length - 1 ? lastRowRef : undefined}
-                value={row}
-                disabled={disabled}
-                onChange={(e) => updateRow(index, e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    if (row.trim() !== "" && index === rows.length - 1) {
-                      addRow();
-                    }
-                  }
-                }}
-                aria-label={t("settings.claude.modelRowLabel", {
-                  index: index + 1,
-                })}
-                placeholder={
-                  defaultModel.trim() === ""
-                    ? t("settings.claude.customModelsHint")
-                    : ""
+          <ModelRow
+            key={index}
+            label={t("settings.claude.modelRowLabel", { index: index + 1 })}
+            value={row}
+            disabled={disabled}
+            placeholder={
+              defaultModel.trim() === ""
+                ? t("settings.claude.customModelsHint")
+                : ""
+            }
+            duplicate={duplicate}
+            status={statusOf(index)}
+            failure={failureOf(index)}
+            testing={statusOf(index) === "testing"}
+            onTest={onTestRow ? () => onTestRow(index) : undefined}
+            onRemove={() => removeRow(index)}
+            inputRef={index === rows.length - 1 ? lastRowRef : undefined}
+            onChange={(value) => updateRow(index, value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                if (row.trim() !== "" && index === rows.length - 1) {
+                  addRow();
                 }
-                className="font-mono text-xs"
-              />
-              {duplicate && (
-                <p className="text-xs text-destructive">
-                  {t("settings.claude.duplicateModel")}
-                </p>
-              )}
-            </div>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              className="shrink-0"
-              disabled={disabled}
-              onClick={() => removeRow(index)}
-              aria-label={t("settings.claude.removeModelRow", {
-                index: index + 1,
-              })}
-            >
-              <X className="size-3.5" />
-            </Button>
-          </div>
+              }
+            }}
+          />
         );
       })}
       <Button
@@ -124,6 +123,122 @@ export function ClaudeModelsEditor({
         <Plus className="size-3.5" />
         {t("settings.claude.addModel")}
       </Button>
+    </div>
+  );
+}
+
+function ModelRow({
+  label,
+  value,
+  disabled,
+  placeholder,
+  badge,
+  duplicate,
+  status,
+  failure,
+  testing,
+  inputRef,
+  onTest,
+  onRemove,
+  onChange,
+  onKeyDown,
+}: {
+  label: string;
+  value: string;
+  disabled?: boolean;
+  placeholder?: string;
+  badge?: string;
+  duplicate?: boolean;
+  status: ModelRowStatus;
+  failure?: string | null;
+  testing?: boolean;
+  inputRef?: React.Ref<HTMLInputElement>;
+  onTest?: () => void;
+  onRemove?: () => void;
+  onChange?: (value: string) => void;
+  onKeyDown?: (e: React.KeyboardEvent<HTMLInputElement>) => void;
+}) {
+  const { t } = useI18n();
+  return (
+    <div className="flex items-center gap-2">
+      <div className="min-w-0 flex-1 space-y-1">
+        <div className="flex items-center gap-2">
+          <Input
+            ref={inputRef}
+            value={value}
+            disabled={disabled}
+            readOnly={!onChange}
+            onChange={(e) => onChange?.(e.target.value)}
+            onKeyDown={onKeyDown}
+            aria-label={label}
+            placeholder={placeholder}
+            className={cn("font-mono text-xs")}
+          />
+          {badge && (
+            <span className="shrink-0 rounded-md border bg-muted/40 px-2 py-1 font-mono text-xs text-muted-foreground">
+              {badge}
+            </span>
+          )}
+          {status === "testing" && (
+            <LoaderCircle
+              className="size-3.5 shrink-0 animate-spin text-primary"
+              aria-label={t("settings.claude.testingModel")}
+            />
+          )}
+          {status === "ok" && (
+            <CheckCircle2
+              className="size-3.5 shrink-0 text-success"
+              aria-label={t("settings.claude.modelAvailable")}
+            />
+          )}
+          {status === "fail" && (
+            <XCircle
+              className="size-3.5 shrink-0 text-destructive"
+              aria-label={t("settings.claude.modelUnavailable")}
+            />
+          )}
+          {onTest && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-7 shrink-0 px-2 text-xs"
+              disabled={disabled || testing || value.trim() === ""}
+              onClick={onTest}
+              title={t("settings.claude.testModelTitle")}
+            >
+              {testing
+                ? t("settings.testing")
+                : t("settings.claude.testModel")}
+            </Button>
+          )}
+          {onRemove && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              className="shrink-0"
+              disabled={disabled}
+              onClick={onRemove}
+              aria-label={t("settings.claude.removeModelRow", {
+                index: label,
+              })}
+            >
+              <X className="size-3.5" />
+            </Button>
+          )}
+        </div>
+        {duplicate && (
+          <p className="text-xs text-destructive">
+            {t("settings.claude.duplicateModel")}
+          </p>
+        )}
+        {status === "fail" && failure && (
+          <p className="truncate text-xs text-destructive" title={failure}>
+            {failure}
+          </p>
+        )}
+      </div>
     </div>
   );
 }

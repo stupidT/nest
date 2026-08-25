@@ -16,7 +16,11 @@ pub struct ProbeOutcome {
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(300);
 
-pub async fn run_connectivity_probe(state: SharedState, cli_path: &str) -> ProbeOutcome {
+pub async fn run_connectivity_probe(
+    state: SharedState,
+    cli_path: &str,
+    model: Option<&str>,
+) -> ProbeOutcome {
     let detections =
         match crate::claude_cli::detect_cli(Some(std::path::Path::new(cli_path.trim()))) {
             Ok(detections) if !detections.is_empty() => detections,
@@ -161,7 +165,7 @@ pub async fn run_connectivity_probe(state: SharedState, cli_path: &str) -> Probe
                 session_id: &probe_session,
                 mode: crate::claude_cli::TurnMode::NewSession,
                 prompt: &prompt,
-                model: None,
+                model: model.filter(|value| !value.trim().is_empty()),
                 chat_mode: CapabilityMode::Agent,
                 mcp_config_path: Some(config.as_path()),
                 system_instructions: None,

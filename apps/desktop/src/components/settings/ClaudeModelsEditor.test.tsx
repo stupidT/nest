@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 import { useState } from "react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "@/lib/i18n";
 import { ClaudeModelsEditor } from "./ClaudeModelsEditor";
 import {
@@ -95,6 +95,55 @@ describe("ClaudeModelsEditor", () => {
     renderEditor(["glm-5.3"]);
     expect(rowValues()).toEqual(["glm-5.3"]);
     expect(screen.queryByText("[default]")).not.toBeInTheDocument();
+  });
+
+  it("renders a per-row test button that fires onTestRow", () => {
+    const onTestRow = vi.fn();
+    render(
+      <I18nProvider locale="en">
+        <ClaudeModelsEditor
+          rows={["glm-5.3", ""]}
+          onTestRow={onTestRow}
+          onChange={() => {}}
+        />
+      </I18nProvider>,
+    );
+    const testButtons = screen.getAllByRole("button", { name: "Test" });
+    expect(testButtons).toHaveLength(2);
+    expect(testButtons[0]).toBeEnabled();
+    expect(testButtons[1]).toBeDisabled();
+    fireEvent.click(testButtons[0]);
+    expect(onTestRow).toHaveBeenCalledWith(0);
+  });
+
+  it("shows testing and result states per row", () => {
+    const { rerender } = render(
+      <I18nProvider locale="en">
+        <ClaudeModelsEditor
+          rows={["glm-5.3", "kimi"]}
+          rowStatuses={{ 0: "testing", 1: "ok" }}
+          onTestRow={() => {}}
+          onChange={() => {}}
+        />
+      </I18nProvider>,
+    );
+    expect(
+      screen.getByRole("button", { name: "Testing…" }),
+    ).toBeInTheDocument();
+    rerender(
+      <I18nProvider locale="en">
+        <ClaudeModelsEditor
+          rows={["glm-5.3", "kimi"]}
+          rowStatuses={{
+            0: { message: "boom" },
+            1: "ok",
+          }}
+          onTestRow={() => {}}
+          onChange={() => {}}
+        />
+      </I18nProvider>,
+    );
+    expect(screen.getByText("boom")).toBeInTheDocument();
   });
 
   it("typing in a row keeps focus and does not auto-append", () => {

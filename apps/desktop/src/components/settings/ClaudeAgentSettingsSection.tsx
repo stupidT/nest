@@ -16,7 +16,10 @@ import { api } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 import { queryKeys } from "@/lib/query-keys";
 import { cn } from "@/lib/utils";
-import { ClaudeModelsEditor } from "./ClaudeModelsEditor";
+import {
+  ClaudeModelsEditor,
+  type ModelRowStatus,
+} from "./ClaudeModelsEditor";
 import { parseModelRows, serializeModelRows } from "./model-rows";
 import { GeneralGroup } from "./GeneralGroup";
 
@@ -44,6 +47,10 @@ function useClaudeAgentSettings(settingsQuery: {
   const [stale, setStale] = useState(false);
   const [detection, setDetection] = useState<ClaudeDetectionDto | null>(null);
   const [detectFailed, setDetectFailed] = useState(false);
+  const [rowStatuses, setRowStatuses] = useState<
+    Record<number, ModelRowStatus | { message: string | null }>
+  >({});
+  const [testingRow, setTestingRow] = useState<number | null>(null);
 
   useEffect(() => {
     if (!settingsQuery.data || hydrated) return;
@@ -99,6 +106,49 @@ function useClaudeAgentSettings(settingsQuery: {
       toast.error(t("settings.claude.couldNotTest"), {
         description: e instanceof Error ? e.message : String(e),
       });
+    },
+  });
+
+  const testModel = useMutation({
+    mutationFn: ({
+      cliPath,
+      model,
+    }: {
+      cliPath: string;
+      model: string;
+    }) => api.claudeTestModel(cliPath, model),
+    onMutate: ({ model }) => {
+      const index = modelRows.findIndex((row) => row.trim() === model.trim());
+      if (index >= 0) setTestingRow(index);
+    },
+    onSuccess: (result) => {
+      const index = modelRows.findIndex(
+        (row) => row.trim() === result.model.trim(),
+      );
+      setTestingRow(null);
+      if (index < 0) return;
+      setRowStatuses((current) => ({
+        ...current,
+        [index]: result.ok
+          ? "ok"
+          : {
+              message:
+                result.message ??
+                result.effective_model ??
+                "model test failed",
+            },
+      }));
+    },
+    onError: (e: unknown, { model }) => {
+      const index = modelRows.findIndex((row) => row.trim() === model.trim());
+      setTestingRow(null);
+      if (index < 0) return;
+      setRowStatuses((current) => ({
+        ...current,
+        [index]: {
+          message: e instanceof Error ? e.message : String(e),
+        },
+      }));
     },
   });
 
@@ -162,6 +212,10 @@ function useClaudeAgentSettings(settingsQuery: {
     setModelRows,
     detect,
     test,
+    testModel,
+    testingRow,
+    rowStatuses,
+    setRowStatuses,
     save,
     dirty,
     markDirty,
@@ -186,6 +240,10 @@ export function ClaudeAgentSettingsSection({
     setModelRows,
     detect,
     test,
+    testModel,
+    testingRow,
+    rowStatuses,
+    setRowStatuses,
     save,
     dirty,
     markDirty,
@@ -383,8 +441,19 @@ export function ClaudeAgentSettingsSection({
           rows={modelRows}
           disabled={save.isPending}
           defaultModel={defaultModel}
+          rowStatuses={
+            testingRow != null
+              ? { ...rowStatuses, [testingRow]: "testing" }
+              : rowStatuses
+          }
+          onTestRow={(index) => {
+            const model = modelRows[index]?.trim();
+            if (!model) return;
+            testModel.mutate({ cliPath: draft.cliPath, model });
+          }}
           onChange={(rows) => {
             setModelRows(rows);
+            setRowStatuses({});
             markDirty();
           }}
         />

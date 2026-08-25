@@ -110,9 +110,46 @@ pub async fn claude_test_connection(
         crate::state::OperationKind::ConnectionProbe,
         "claude_test_connection",
     )?;
-    let report = test_connection(&cli_path, &state).await;
+    let report = test_connection(&cli_path, None, &state).await;
     *state.claude_connection.lock() = Some(report.clone());
     Ok(report)
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ClaudeModelTestResult {
+    pub model: String,
+    pub ok: bool,
+    pub message: Option<String>,
+    pub effective_model: Option<String>,
+}
+
+#[tauri::command]
+pub async fn claude_test_model(
+    state: State<'_, SharedState>,
+    cli_path: String,
+    model: String,
+) -> AppResult<ClaudeModelTestResult> {
+    let trimmed_model = model.trim().to_string();
+    if trimmed_model.is_empty() {
+        return Ok(ClaudeModelTestResult {
+            model: trimmed_model,
+            ok: false,
+            message: Some("model id is empty".to_string()),
+            effective_model: None,
+        });
+    }
+    let _slot = state.inner().begin_operation(
+        crate::state::OperationKind::ConnectionProbe,
+        "claude_test_model",
+    )?;
+    let report = test_connection(&cli_path, Some(&trimmed_model), &state).await;
+    Ok(ClaudeModelTestResult {
+        ok: report.status == ClaudeConnectionStatus::Connected,
+        message: report.message,
+        effective_model: (!report.effective_model.trim().is_empty())
+            .then(|| report.effective_model.trim().to_string()),
+        model: trimmed_model,
+    })
 }
 
 #[tauri::command]
@@ -169,10 +206,10 @@ pub async fn claude_save_settings(
             report
         }
         None => {
-            let mut report = test_connection(&request.cli_path, &state).await;
+            let mut report = test_connection(&request.cli_path, None, &state).await;
             if report.status != ClaudeConnectionStatus::Connected {
                 tokio::time::sleep(Duration::from_millis(750)).await;
-                report = test_connection(&request.cli_path, &state).await;
+                report = test_connection(&request.cli_path, None, &state).await;
             }
             if report.status == ClaudeConnectionStatus::Connected {
                 let conn = state.db.lock();
@@ -236,7 +273,11 @@ pub fn claude_connection_proven(state: &SharedState, settings: &db::AppSettings)
     )
 }
 
-async fn test_connection(cli_path: &str, state: &SharedState) -> ClaudeConnectionReport {
+async fn test_connection(
+    cli_path: &str,
+    model: Option<&str>,
+    state: &SharedState,
+) -> ClaudeConnectionReport {
     let trimmed = cli_path.trim();
     let configured = if trimmed.is_empty() {
         None
@@ -248,16 +289,18 @@ async fn test_connection(cli_path: &str, state: &SharedState) -> ClaudeConnectio
         _ => return unavailable_report(trimmed, "no Claude CLI candidate found"),
     };
     let detection = detections[0].clone();
-    connectivity_probe(&detection, trimmed, state).await
+    connectivity_probe(&detection, trimmed, model, state).await
 }
 
 async fn connectivity_probe(
     detection: &ClaudeDetection,
     configured_path: &str,
+    model: Option<&str>,
     state: &SharedState,
 ) -> ClaudeConnectionReport {
     let probe =
-        crate::connection_probe::run_connectivity_probe(state.clone(), configured_path).await;
+        crate::connection_probe::run_connectivity_probe(state.clone(), configured_path, model)
+            .await;
     if !probe.failures.is_empty() {
         return unavailable_report(
             configured_path,

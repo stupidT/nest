@@ -459,6 +459,13 @@ export type ClaudeModelOption = {
   source: "default" | "observed" | "custom";
 };
 
+export type ClaudeModelTestResult = {
+  model: string;
+  ok: boolean;
+  message: string | null;
+  effective_model: string | null;
+};
+
 export type ToolActivityRow = {
   id: string;
   turn_id: string;
