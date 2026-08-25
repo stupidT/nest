@@ -2,6 +2,11 @@ import { CheckCircle2, LoaderCircle, Plus, X, XCircle } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { useI18n } from "@/lib/i18n";
 import { isDuplicateRow } from "./model-rows";
 
@@ -195,6 +200,23 @@ function ModelRow({
         : status === "fail"
           ? (statusMessage ?? t("settings.claude.modelUnavailable"))
           : undefined;
+  const statusIcon =
+    status === "testing" ? (
+      <LoaderCircle
+        className="size-3.5 animate-spin text-primary"
+        aria-label={t("settings.claude.testingModel")}
+      />
+    ) : status === "ok" ? (
+      <CheckCircle2
+        className="size-3.5 text-success"
+        aria-label={t("settings.claude.modelAvailable")}
+      />
+    ) : status === "fail" ? (
+      <XCircle
+        className="size-3.5 cursor-help text-destructive"
+        aria-label={t("settings.claude.modelUnavailable")}
+      />
+    ) : null;
   return (
     <div className="min-w-0 space-y-1">
       <div className="grid grid-cols-[1fr_auto_auto_auto] items-center gap-2">
@@ -209,27 +231,21 @@ function ModelRow({
           placeholder={placeholder}
           className="min-w-0 font-mono text-xs"
         />
-        <span
-          className="flex w-4 shrink-0 items-center justify-center"
-          title={statusTitle}
-        >
-          {status === "testing" && (
-            <LoaderCircle
-              className="size-3.5 animate-spin text-primary"
-              aria-label={t("settings.claude.testingModel")}
-            />
-          )}
-          {status === "ok" && (
-            <CheckCircle2
-              className="size-3.5 text-success"
-              aria-label={t("settings.claude.modelAvailable")}
-            />
-          )}
-          {status === "fail" && (
-            <XCircle
-              className="size-3.5 cursor-help text-destructive"
-              aria-label={t("settings.claude.modelUnavailable")}
-            />
+        <span className="flex w-4 shrink-0 items-center justify-center">
+          {statusTitle ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span className="flex items-center">{statusIcon}</span>
+              </TooltipTrigger>
+              <TooltipContent
+                side="top"
+                className="max-w-72 whitespace-normal break-words text-left"
+              >
+                {statusTitle}
+              </TooltipContent>
+            </Tooltip>
+          ) : (
+            statusIcon
           )}
         </span>
         <Button

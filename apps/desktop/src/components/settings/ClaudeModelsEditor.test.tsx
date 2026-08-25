@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "@/lib/i18n";
@@ -16,7 +17,9 @@ function Harness({ initial }: { initial: string[] }) {
   const [rows, setRows] = useState(initial);
   return (
     <I18nProvider locale="en">
-      <ClaudeModelsEditor rows={rows} onChange={setRows} />
+      <TooltipProvider>
+        <ClaudeModelsEditor rows={rows} onChange={setRows} />
+      </TooltipProvider>
     </I18nProvider>
   );
 }
@@ -76,11 +79,13 @@ describe("ClaudeModelsEditor", () => {
   it("shows the current default model as a read-only first row", () => {
     render(
       <I18nProvider locale="en">
-        <ClaudeModelsEditor
-          rows={["glm-5.3", ""]}
-          defaultModel="claude-sonnet-4-5"
-          onChange={() => {}}
-        />
+        <TooltipProvider>
+          <ClaudeModelsEditor
+            rows={["glm-5.3", ""]}
+            defaultModel="claude-sonnet-4-5"
+            onChange={() => {}}
+          />
+        </TooltipProvider>
       </I18nProvider>,
     );
     expect(rowValues()).toEqual(["claude-sonnet-4-5", "glm-5.3", ""]);
@@ -139,25 +144,28 @@ describe("ClaudeModelsEditor", () => {
     expect(onSaveRow).toHaveBeenCalledWith(1);
   });
 
-  it("shows failure messages only as hover titles on the status icon", () => {
+  it("shows failure messages only via tooltip on the status icon", () => {
     render(
       <I18nProvider locale="en">
-        <ClaudeModelsEditor
-          rows={["glm-5.3", "kimi"]}
-          rowStatuses={{
-            "glm-5.3": { ok: false, message: "API Error: 400" },
-            kimi: { ok: true, message: "passed at t1" },
-          }}
-          onTestRow={() => {}}
-          onChange={() => {}}
-        />
+        <TooltipProvider>
+          <ClaudeModelsEditor
+            rows={["glm-5.3", "kimi"]}
+            rowStatuses={{
+              "glm-5.3": { ok: false, message: "API Error: 400" },
+              kimi: { ok: true, message: "passed at t1" },
+            }}
+            onTestRow={() => {}}
+            onChange={() => {}}
+          />
+        </TooltipProvider>
       </I18nProvider>,
     );
     expect(screen.queryByText("API Error: 400")).not.toBeInTheDocument();
-    const failTitle = document.querySelector('[title="API Error: 400"]');
-    expect(failTitle).not.toBeNull();
-    const okTitle = document.querySelector('[title="passed at t1"]');
-    expect(okTitle).not.toBeNull();
+    const failIcon = screen.getByLabelText("Model unavailable");
+    expect(failIcon).toBeInTheDocument();
+    const okIcon = screen.getByLabelText("Model available");
+    expect(okIcon).toBeInTheDocument();
+    expect(document.querySelector('[title="API Error: 400"]')).toBeNull();
   });
 
   it("typing in a row keeps focus and does not auto-append", () => {
