@@ -1,8 +1,9 @@
 import type { BackendDescriptor } from "@nest/shared";
 
 export type BackendBlockNotice = {
-  message: string;
-  linkText: string | null;
+  before: string;
+  linkWord: string | null;
+  after: string;
   settingsTarget: "claude-agent" | "general" | null;
 };
 
@@ -20,57 +21,62 @@ export function backendBlockNotice(
         ? "general"
         : null;
 
-  const message = (() => {
-    if (!descriptor.enabled) {
-      return `${label} is disabled for this chat.`;
-    }
-    switch (reason) {
-      case "cli_missing":
-        return `${label} has no CLI path configured.`;
-      case "connection_unverified":
-        return `${label} is not connected yet.`;
-      case "reindex_required":
-        return `${label} is unavailable until the workspace is reindexed.`;
-      case "unknown_backend":
-        return `${label} is not installed in this build. Start a new chat with an available agent.`;
-      default:
-        return descriptor.message
+  if (!descriptor.enabled) {
+    return {
+      before: `${label} is disabled for this chat. Enable it in `,
+      linkWord: "Settings",
+      after: ".",
+      settingsTarget: target,
+    };
+  }
+  switch (reason) {
+    case "cli_missing":
+      return {
+        before: `${label} has no CLI path configured. Set it in `,
+        linkWord: "Settings",
+        after: ".",
+        settingsTarget: target,
+      };
+    case "connection_unverified":
+      return {
+        before: `${label} is not connected yet. Run Test connection in `,
+        linkWord: "Settings",
+        after: ".",
+        settingsTarget: target,
+      };
+    case "reindex_required":
+      return {
+        before: `${label} is unavailable until the workspace is reindexed.`,
+        linkWord: null,
+        after: "",
+        settingsTarget: null,
+      };
+    case "unknown_backend":
+      return {
+        before: `${label} is not installed in this build. Start a new chat with an available agent.`,
+        linkWord: null,
+        after: "",
+        settingsTarget: null,
+      };
+    default:
+      return {
+        before: descriptor.message
           ? `${label}: ${descriptor.message}`
-          : `${label} is unavailable.`;
-    }
-  })();
-
-  const linkText = (() => {
-    if (!descriptor.enabled) {
-      return "Enable it in Settings";
-    }
-    switch (reason) {
-      case "cli_missing":
-        return "Set the CLI path in Settings";
-      case "connection_unverified":
-        return "Run Test connection in Settings";
-      case "reindex_required":
-        return null;
-      case "unknown_backend":
-        return null;
-      default:
-        return target ? "Check Settings" : null;
-    }
-  })();
-
-  return {
-    message,
-    linkText,
-    settingsTarget: linkText ? target : null,
-  };
+          : `${label} is unavailable.`,
+        linkWord: target ? "Settings" : null,
+        after: "",
+        settingsTarget: target,
+      };
+  }
 }
 
 export function backendBlockNoticeFromReason(
   reason: string,
 ): BackendBlockNotice | null {
   return {
-    message: reason,
-    linkText: null,
+    before: reason,
+    linkWord: null,
+    after: "",
     settingsTarget: null,
   };
 }

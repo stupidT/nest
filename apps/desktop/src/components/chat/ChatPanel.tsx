@@ -258,8 +258,9 @@ export function ChatPanel() {
       !activeDescriptor.enabled);
   const activeOperation = operationQuery.data;
   const blockedNotice: {
-    message: string;
-    linkText: string | null;
+    before: string;
+    linkWord: string | null;
+    after: string;
     settingsTarget: "claude-agent" | "general" | null;
   } | null = isSending
     ? null
@@ -272,7 +273,7 @@ export function ChatPanel() {
         : composerGate.reason
           ? backendBlockNoticeFromReason(composerGate.reason)
           : null;
-  const composerBlocked: string | null = blockedNotice?.message ?? null;
+  const composerBlocked: string | null = blockedNotice?.before || null;
   const backendNotice = claudeBackendNotice(
     currentSession ? { backend: currentSession.backend, backend_status: currentSession.backend_status } : null,
     claudeStatus,
@@ -753,13 +754,13 @@ export function ChatPanel() {
 
       <div className="shrink-0 px-3 pb-3 pt-4">
         {composerBlocked && (
-          <div className="mb-2 flex flex-wrap items-center gap-x-1.5 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
-            <AlertCircle className="size-3.5 shrink-0" />
+          <div className="mb-2 flex flex-wrap items-center gap-x-1 rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-xs text-muted-foreground">
+            <AlertCircle className="size-3.5 shrink-0 text-destructive" />
             <span>{composerBlocked}</span>
-            {blockedNotice?.linkText && blockedNotice.settingsTarget && (
+            {blockedNotice?.linkWord && blockedNotice.settingsTarget && (
               <button
                 type="button"
-                className="font-medium text-primary hover:underline"
+                className="rounded-sm border border-destructive/40 bg-card px-1.5 py-px font-medium text-destructive transition-colors hover:bg-destructive/10"
                 onClick={() => {
                   if (blockedNotice.settingsTarget === "claude-agent") {
                     openClaudeSettingsTab();
@@ -768,13 +769,14 @@ export function ChatPanel() {
                   }
                 }}
               >
-                {blockedNotice.linkText}
+                {blockedNotice.linkWord}
               </button>
             )}
+            {blockedNotice?.after}
             {composerGate.reconnectable && (
               <button
                 type="button"
-                className="flex items-center gap-1 font-medium text-primary hover:underline disabled:opacity-60"
+                className="ml-1 flex items-center gap-1 font-medium text-primary hover:underline disabled:opacity-60"
                 disabled={reconnectClaude.isPending}
                 onClick={() => reconnectClaude.mutate()}
               >

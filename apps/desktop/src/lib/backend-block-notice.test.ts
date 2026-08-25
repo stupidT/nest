@@ -22,31 +22,34 @@ function descriptor(
 }
 
 describe("backendBlockNotice", () => {
-  it("names the disabled agent with an inline settings link", () => {
+  it("splits the disabled-agent notice around a Settings link word", () => {
     const notice = backendBlockNotice(
       descriptor({ enabled: false, reason_code: "disabled" }),
     );
-    expect(notice.message).toBe("Claude is disabled for this chat.");
-    expect(notice.linkText).toBe("Enable it in Settings");
+    expect(notice.before).toBe("Claude is disabled for this chat. Enable it in ");
+    expect(notice.linkWord).toBe("Settings");
+    expect(notice.after).toBe(".");
     expect(notice.settingsTarget).toBe("claude-agent");
   });
 
-  it("explains an unverified connection with a reconnect hint", () => {
+  it("splits the unverified-connection notice around a Settings link word", () => {
     const notice = backendBlockNotice(
       descriptor({ reason_code: "connection_unverified" }),
     );
-    expect(notice.message).toBe("Claude is not connected yet.");
-    expect(notice.linkText).toBe("Run Test connection in Settings");
+    expect(notice.before).toBe(
+      "Claude is not connected yet. Run Test connection in ",
+    );
+    expect(notice.linkWord).toBe("Settings");
     expect(notice.settingsTarget).toBe("claude-agent");
   });
 
-  it("explains a missing CLI path", () => {
+  it("splits the missing CLI path notice around a Settings link word", () => {
     const notice = backendBlockNotice(descriptor({ reason_code: "cli_missing" }));
-    expect(notice.message).toBe("Claude has no CLI path configured.");
-    expect(notice.linkText).toBe("Set the CLI path in Settings");
+    expect(notice.before).toBe("Claude has no CLI path configured. Set it in ");
+    expect(notice.linkWord).toBe("Settings");
   });
 
-  it("explains a reindex-required Nest backend without a settings link", () => {
+  it("keeps the reindex notice as a single sentence without a link", () => {
     const notice = backendBlockNotice(
       descriptor({
         id: "nest",
@@ -55,10 +58,10 @@ describe("backendBlockNotice", () => {
         settings_target: "general",
       }),
     );
-    expect(notice.message).toBe(
+    expect(notice.before).toBe(
       "Nest Agent is unavailable until the workspace is reindexed.",
     );
-    expect(notice.linkText).toBeNull();
+    expect(notice.linkWord).toBeNull();
     expect(notice.settingsTarget).toBeNull();
   });
 
@@ -66,7 +69,7 @@ describe("backendBlockNotice", () => {
     const notice = backendBlockNotice(
       descriptor({ reason_code: "other", message: "boom" }),
     );
-    expect(notice.message).toBe("Claude: boom");
-    expect(notice.linkText).toBe("Check Settings");
+    expect(notice.before).toBe("Claude: boom");
+    expect(notice.linkWord).toBe("Settings");
   });
 });
