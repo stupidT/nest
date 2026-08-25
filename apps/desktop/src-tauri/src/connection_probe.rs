@@ -287,7 +287,7 @@ fn validate_observations(
             "knowledge_create" => item.output.contains("Staged create"),
             "knowledge_replace" => item.output.contains("Staged replace"),
             "knowledge_delete" => item.output.contains("Staged delete"),
-            "knowledge_list" => item.output.contains(path),
+            "knowledge_list" => item.output.contains("\"files\""),
             "knowledge_read" => item.output.contains(read_marker),
             "knowledge_search" => item.output.contains(path) && item.output.contains(search_marker),
             _ => false,
@@ -464,6 +464,26 @@ mod tests {
             "pack/probe.md",
             "marker",
             "marker-v2",
+            &mut failures,
+        );
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    #[test]
+    fn semantic_validation_accepts_empty_list_result() {
+        let observations = vec![crate::claude_mcp::ToolObservation {
+            name: "knowledge_list".to_string(),
+            target: Some("__probe_x".to_string()),
+            succeeded: true,
+            output: "{\n  \"files\": [],\n  \"truncated\": false\n}".to_string(),
+        }];
+        let mut failures = Vec::new();
+        validate_observations(
+            &observations,
+            &["knowledge_list"],
+            "__probe_x",
+            "__probe_x",
+            "__probe_x",
             &mut failures,
         );
         assert!(failures.is_empty(), "{failures:?}");
