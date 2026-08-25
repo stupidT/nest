@@ -754,13 +754,13 @@ export function ChatPanel() {
 
       <div className="shrink-0 px-3 pb-3 pt-4">
         {composerBlocked && (
-          <div className="mb-2 flex flex-wrap items-center gap-x-1 rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-xs text-muted-foreground">
+          <div className="mb-2 flex flex-wrap items-center gap-x-1 rounded-md border border-destructive/40 bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
             <AlertCircle className="size-3.5 shrink-0 text-destructive" />
             <span>{composerBlocked}</span>
             {blockedNotice?.linkWord && blockedNotice.settingsTarget && (
               <button
                 type="button"
-                className="rounded-sm border border-destructive/40 bg-card px-1.5 py-px font-medium text-destructive transition-colors hover:bg-destructive/10"
+                className="rounded-sm border border-border bg-card px-1.5 py-px font-medium text-foreground transition-colors hover:bg-muted"
                 onClick={() => {
                   if (blockedNotice.settingsTarget === "claude-agent") {
                     openClaudeSettingsTab();
