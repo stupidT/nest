@@ -189,7 +189,7 @@ function ModelRow({
   const { t } = useI18n();
   return (
     <div className="min-w-0 space-y-1">
-      <div className="flex items-center gap-2">
+      <div className="grid grid-cols-[1fr_auto_auto_auto] items-center gap-2">
         <Input
           ref={inputRef}
           value={value}
@@ -199,9 +199,9 @@ function ModelRow({
           onKeyDown={onKeyDown}
           aria-label={label}
           placeholder={placeholder}
-          className="min-w-0 flex-1 font-mono text-xs"
+          className="min-w-0 font-mono text-xs"
         />
-        <span className="flex w-3.5 shrink-0 items-center justify-center">
+        <span className="flex w-4 shrink-0 items-center justify-center">
           {status === "testing" && (
             <LoaderCircle
               className="size-3.5 animate-spin text-primary"
@@ -224,12 +224,14 @@ function ModelRow({
         <Button
           type="button"
           variant="outline"
-          className="h-7 w-16 shrink-0 px-1 text-xs"
+          className="h-7 w-[68px] shrink-0 overflow-hidden px-1 text-xs"
           disabled={disabled || actionDisabled || value.trim() === ""}
           onClick={onAction}
           title={t("settings.claude.testModelTitle")}
         >
-          {status === "testing" ? t("settings.testing") : actionLabel}
+          <span className="truncate">
+            {status === "testing" ? t("settings.testing") : actionLabel}
+          </span>
         </Button>
         <Button
           type="button"
