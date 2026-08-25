@@ -200,6 +200,18 @@ function useClaudeAgentSettings(settingsQuery: {
         ? connectionQuery.data
         : null;
 
+  const defaultModelReport =
+    connectionQuery.data &&
+    connectionQuery.data.configured_cli_path === draft.cliPath.trim()
+      ? connectionQuery.data
+      : null;
+  const defaultModel =
+    defaultModelReport != null &&
+    (defaultModelReport.status === "connected" ||
+      defaultModelReport.status === "last_connected")
+      ? (defaultModelReport.effective_model ?? "").trim()
+      : "";
+
   const clearDetection = () => {
     setDetection(null);
     setDetectFailed(false);
@@ -221,6 +233,7 @@ function useClaudeAgentSettings(settingsQuery: {
     markDirty,
     testResult,
     persistedStatus,
+    defaultModel,
     detectFailed,
     detection,
     clearDetection,
@@ -249,6 +262,7 @@ export function ClaudeAgentSettingsSection({
     markDirty,
     testResult,
     persistedStatus,
+    defaultModel,
     detectFailed,
     detection,
     clearDetection,
@@ -258,9 +272,6 @@ export function ClaudeAgentSettingsSection({
   const reportConnected =
     displayReport?.status === "connected" ||
     displayReport?.status === "last_connected";
-  const defaultModel = reportConnected
-    ? (displayReport?.effective_model ?? "").trim()
-    : "";
 
   return (
     <GeneralGroup
