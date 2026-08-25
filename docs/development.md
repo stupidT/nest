@@ -55,7 +55,7 @@ The effective knowledge view is `turn-local staged > pending proposal > disk/ind
 
 Claude tool activity has three stable sources: `nest_mcp`, `external_mcp`, and `claude_native`. A tool named `mcp__<server>__<tool>` outside the reserved `mcp__nest__*` namespace is external MCP activity; it must not produce Nest Sources, permissions, staging, or proposals. Ask launches with a strict MCP config, while Agent keeps user/project MCP discovery open and injects the authenticated `nest` server for the reserved name.
 
-The Settings connection test is intentionally destructive only inside an isolated temporary pack. It runs a real two-turn Claude session, observes the six MCP tools and their semantic results, applies proposals through the production review path, waits for index generations, and verifies cleanup. A lightweight MCP registration or fake health call is not an acceptable replacement.
+The Settings connection test runs a single real headless Claude turn against an isolated temporary pack: it verifies the CLI launches, the loopback MCP server answers, and one `knowledge_list` call succeeds through Claude before the pack is cleaned up. Save and connect reuses an already-successful report for the same CLI path; it only re-tests when no matching report exists. A fake health call without a real CLI turn is not an acceptable replacement.
 
 ### Refreshing the bundled tutorial packs
 

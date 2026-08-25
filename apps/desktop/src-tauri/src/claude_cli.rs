@@ -192,25 +192,19 @@ pub(crate) fn resolve_entry(
     if !path.is_file() {
         return Err(invalid_path(path));
     }
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default();
     let extension = path
         .extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| ext.to_ascii_lowercase());
     let candidate = match extension.as_deref() {
-        Some("exe") if file_name.eq_ignore_ascii_case("claude.exe") => (
+        Some("exe") => (
             path.to_path_buf(),
             ClaudeLaunchTarget::Executable {
                 executable: path.to_path_buf(),
             },
         ),
-        Some("cjs") if file_name.eq_ignore_ascii_case("cli-wrapper.cjs") => {
-            (path.to_path_buf(), build_node_target(path, path_env)?)
-        }
-        Some("cmd") | Some("ps1") | None if file_stem_is_claude(path) => match resolve_shim(path) {
+        Some("cjs") => (path.to_path_buf(), build_node_target(path, path_env)?),
+        Some("cmd") | Some("bat") | Some("ps1") | None => match resolve_shim(path) {
             Some(wrapper) => (wrapper.clone(), build_node_target(&wrapper, path_env)?),
             None if !cfg!(windows) && path.extension().is_none() && is_native_binary(path) => (
                 path.to_path_buf(),
@@ -223,12 +217,6 @@ pub(crate) fn resolve_entry(
         _ => return Err(invalid_path(path)),
     };
     Ok(vec![candidate])
-}
-
-fn file_stem_is_claude(path: &Path) -> bool {
-    path.file_stem()
-        .and_then(|stem| stem.to_str())
-        .is_some_and(|stem| stem.eq_ignore_ascii_case("claude"))
 }
 
 pub(crate) fn resolve_shim(shim: &Path) -> Option<PathBuf> {
@@ -1677,19 +1665,44 @@ mod resolver_tests {
     }
 
     #[test]
-    fn arbitrary_exe_files_are_rejected() {
-        let fx = Fixture::new("evil-exe");
-        let exe = fx.touch("tools/evil.exe");
-        let err = detect_cli(Some(&exe)).unwrap_err();
-        assert_eq!(err.code(), ClaudeErrorCode::InvalidCliPath);
+    fn renamed_exe_files_are_accepted() {
+        let fx = Fixture::new("renamed-exe");
+        let exe = fx.touch("tools/claude2.exe");
+        let detections = detect_cli(Some(&exe)).unwrap();
+        assert_eq!(
+            detections[0].launch_target,
+            ClaudeLaunchTarget::Executable { executable: exe }
+        );
     }
 
     #[test]
-    fn arbitrary_scripts_are_rejected() {
-        let fx = Fixture::new("evil-cjs");
-        let script = fx.touch("tools/other.cjs");
-        let err = detect_cli(Some(&script)).unwrap_err();
-        assert_eq!(err.code(), ClaudeErrorCode::InvalidCliPath);
+    fn renamed_node_scripts_are_accepted() {
+        let fx = Fixture::new("renamed-cjs");
+        let script = fx.touch("tools/my-claude.cjs");
+        fx.touch("tools/node.exe");
+        let detections = detect_cli(Some(&script)).unwrap();
+        assert!(matches!(
+            &detections[0].launch_target,
+            ClaudeLaunchTarget::NodeScript { script: resolved, .. } if *resolved == script
+        ));
+    }
+
+    #[test]
+    fn renamed_shims_resolving_to_the_wrapper_are_accepted() {
+        let fx = Fixture::new("renamed-shim");
+        let shim = fx.touch("tools/myclaude.cmd");
+        let wrapper = fx.touch("tools/node_modules/@anthropic-ai/claude-code/cli-wrapper.cjs");
+        fx.touch("tools/node.exe");
+        std::fs::write(
+            &shim,
+            "@echo off\r\nnode \"%~dp0\\node_modules\\@anthropic-ai\\claude-code\\cli-wrapper.cjs\" %*\r\n",
+        )
+        .unwrap();
+        let detections = detect_cli(Some(&shim)).unwrap();
+        assert!(matches!(
+            &detections[0].launch_target,
+            ClaudeLaunchTarget::NodeScript { script, .. } if *script == wrapper
+        ));
     }
 
     #[test]

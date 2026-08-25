@@ -248,20 +248,16 @@ async fn test_connection(cli_path: &str, state: &SharedState) -> ClaudeConnectio
         _ => return unavailable_report(trimmed, "no Claude CLI candidate found"),
     };
     let detection = detections[0].clone();
-    full_tool_probe(&detection, trimmed, state).await
+    connectivity_probe(&detection, trimmed, state).await
 }
 
-async fn full_tool_probe(
+async fn connectivity_probe(
     detection: &ClaudeDetection,
     configured_path: &str,
     state: &SharedState,
 ) -> ClaudeConnectionReport {
-    let probe = crate::connection_probe::run_six_tool_probe(
-        state.clone(),
-        None,
-        Some(configured_path.to_string()),
-    )
-    .await;
+    let probe =
+        crate::connection_probe::run_connectivity_probe(state.clone(), configured_path).await;
     if !probe.failures.is_empty() {
         return unavailable_report(
             configured_path,

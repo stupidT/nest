@@ -37,7 +37,7 @@ npm run tauri dev
 5. In **Chat**, ask questions over all active packs, or `@`-mention files/folders under active packs to narrow focus.
 6. Chat supports **multiple sessions**: tabs for open chats, History for pin/archive/rename/delete. Session titles are generated after the first reply when still untitled.
 7. Choose **Ask** for read-only answers or **Agent** for permissioned Markdown proposals. Agent previews pending content immediately; review its unified inline diff in the Markdown editor, then **Approve** to write and index it or **Reject** to discard it. Unresolved proposals remain the effective workspace for follow-up Agent turns.
-8. (Optional, Windows) Enable **Claude Agent** in Settings to use a signed-in local Claude CLI as the chat backend. **Save and connect** runs a real two-turn Nest knowledge-tool probe before Claude becomes selectable; see the [Claude Agent guide](docs/claude-agent.md).
+8. (Optional, Windows) Enable **Claude Agent** in Settings to use a signed-in local Claude CLI as the chat backend. **Test connection** runs a live CLI round trip with a Nest knowledge-tool check before Claude becomes selectable; see the [Claude Agent guide](docs/claude-agent.md).
 
 ### Markdown support in the app
 
