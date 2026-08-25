@@ -50,7 +50,7 @@ vi.mock("@/lib/api", () => ({
     }),
     claudeModelOptions: vi.fn().mockResolvedValue([
       { model_id: "", source: "default" },
-      { model_id: "glm-5.3[1m]", source: "observed" },
+      { model_id: "glm-5.3[1m]", source: "custom" },
     ]),
     vaultListTree: vi.fn().mockResolvedValue([]),
     hubListInstalled: vi.fn().mockResolvedValue([]),

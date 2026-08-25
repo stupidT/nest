@@ -71,34 +71,33 @@ pub struct ClaudeModelOptionDto {
 
 #[tauri::command]
 pub fn claude_model_options(state: State<'_, SharedState>) -> AppResult<Vec<ClaudeModelOptionDto>> {
-    let settings = {
+    let (settings, statuses) = {
         let conn = state.db.lock();
-        db::get_settings(&conn)?
+        (
+            db::get_settings(&conn)?,
+            db::load_claude_model_statuses(&conn)?,
+        )
     };
-    let mut observed = {
-        let conn = state.db.lock();
-        db::observed_claude_models(&conn, &settings.claude_cli_path)?
-    };
-    if let Some(memory) = state.claude_connection.lock().as_ref() {
-        if memory.status == ClaudeConnectionStatus::Connected
-            && memory.matches_configured(&settings.claude_cli_path)
-            && !memory.effective_model.trim().is_empty()
-        {
-            let model = memory.effective_model.trim().to_string();
-            if !observed.iter().any(|m| m == &model) {
-                observed.insert(0, model);
-            }
-        }
-    }
-    Ok(
-        db::claude_model_options(&observed, &settings.claude_custom_models)
-            .into_iter()
-            .map(|option| ClaudeModelOptionDto {
-                model_id: option.model_id,
-                source: option.source.as_str().to_string(),
-            })
-            .collect(),
-    )
+    Ok(db::claude_model_options(&settings.claude_custom_models)
+        .into_iter()
+        .filter(|option| {
+            !statuses
+                .get(&option.model_id)
+                .is_some_and(|entry| !entry.ok)
+        })
+        .map(|option| ClaudeModelOptionDto {
+            model_id: option.model_id,
+            source: option.source.as_str().to_string(),
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub fn claude_model_statuses(
+    state: State<'_, SharedState>,
+) -> AppResult<std::collections::HashMap<String, db::ClaudeModelStatusEntry>> {
+    let conn = state.db.lock();
+    db::load_claude_model_statuses(&conn)
 }
 
 #[tauri::command]
@@ -143,13 +142,26 @@ pub async fn claude_test_model(
         "claude_test_model",
     )?;
     let report = test_connection(&cli_path, Some(&trimmed_model), &state).await;
-    Ok(ClaudeModelTestResult {
+    let result = ClaudeModelTestResult {
         ok: report.status == ClaudeConnectionStatus::Connected,
-        message: report.message,
+        message: report.message.clone(),
         effective_model: (!report.effective_model.trim().is_empty())
             .then(|| report.effective_model.trim().to_string()),
-        model: trimmed_model,
-    })
+        model: trimmed_model.clone(),
+    };
+    {
+        let conn = state.db.lock();
+        db::upsert_claude_model_status(
+            &conn,
+            &trimmed_model,
+            &db::ClaudeModelStatusEntry {
+                ok: result.ok,
+                message: result.message.clone(),
+                tested_at: Utc::now().to_rfc3339(),
+            },
+        )?;
+    }
+    Ok(result)
 }
 
 #[tauri::command]

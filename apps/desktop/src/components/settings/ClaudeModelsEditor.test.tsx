@@ -85,7 +85,8 @@ describe("ClaudeModelsEditor", () => {
     );
     expect(rowValues()).toEqual(["claude-sonnet-4-5", "glm-5.3", ""]);
     expect(inputs()[0]).toBeDisabled();
-    expect(screen.getByText("[default]")).toBeInTheDocument();
+    const defaultAction = screen.getByRole("button", { name: "default" });
+    expect(defaultAction).toBeDisabled();
     expect(
       screen.getAllByRole("button", { name: /remove model/i }),
     ).toHaveLength(2);
@@ -94,7 +95,9 @@ describe("ClaudeModelsEditor", () => {
   it("omits the default row when no model is connected", () => {
     renderEditor(["glm-5.3"]);
     expect(rowValues()).toEqual(["glm-5.3"]);
-    expect(screen.queryByText("[default]")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "default" }),
+    ).not.toBeInTheDocument();
   });
 
   it("renders a per-row test button that fires onTestRow", () => {
@@ -114,6 +117,26 @@ describe("ClaudeModelsEditor", () => {
     expect(testButtons[1]).toBeDisabled();
     fireEvent.click(testButtons[0]);
     expect(onTestRow).toHaveBeenCalledWith(0);
+  });
+
+  it("shows Save on unsaved rows and fires onSaveRow", () => {
+    const onTestRow = vi.fn();
+    const onSaveRow = vi.fn();
+    render(
+      <I18nProvider locale="en">
+        <ClaudeModelsEditor
+          rows={["glm-5.3", "kimi"]}
+          savedModels={new Set(["glm-5.3"])}
+          onTestRow={onTestRow}
+          onSaveRow={onSaveRow}
+          onChange={() => {}}
+        />
+      </I18nProvider>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Test" }));
+    expect(onTestRow).toHaveBeenCalledWith(0);
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(onSaveRow).toHaveBeenCalledWith(1);
   });
 
   it("shows testing and result states per row keyed by model id", () => {

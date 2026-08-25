@@ -89,6 +89,7 @@ pub fn run() {
             commands::claude_detect_cli,
             commands::claude_test_connection,
             commands::claude_test_model,
+            commands::claude_model_statuses,
             commands::claude_save_settings,
             commands::claude_connection_status,
             commands::claude_model_options,

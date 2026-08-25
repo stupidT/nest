@@ -267,6 +267,8 @@ Probe 运行在开放式 Agent runtime，但 challenge 明确要求对测试目�
 
 2026-08 修订二：连接测试进一步简化为单轮连通性 probe——一个 headless Claude turn 仅调用 `knowledge_list`（临时 pack 上的一次只读调用），验证 CLI 启动、MCP server 应答与 Nest-first 路由可用；不再执行六工具两轮、proposal apply、索引等待与 search 验证（写路径的验收由 Knowledge Change Proposal 的既有测试覆盖）。D25 的"只读调用不算连接成功"约束放宽为"必须经真实 CLI turn 驱动 MCP 调用"。同批修订：手动 CLI path 不再强制文件名——任意 `.exe`/`.cjs` 入口或可解析到 npm wrapper 的改名 shim 均接受（auto-detect 仍按固定名扫描）。
 
+2026-08 修订三：observed-model 来源整体退役。Model options 只由两处构成：CLI Default（当前 Connection Report 的 `effective_model`）+ 用户 Custom models；`chat_turns` 历史与旧报告不再回流选项。每个 Custom model 有持久化测试状态（`claude_model_status_v1`：ok/message/tested_at），Settings 中行内 Test 即时更新；编辑未保存的行按钮变为 Save，保存后自动触发该模型的连通测试；测试失败的模型显示 ✗ 且不进入 composer Model options。Custom model 状态在保存设置时按列表 prune。
+
 ### D26. Step 1 会话最低成本迁移
 
 保留已有 Backend Binding；旧 Claude session 的 Model Selection 初始化为 `CLI Default`，MCP credential 首次使用时延迟创建；旧 Nest session 使用当前 Settings 模型。旧会话均为开发态测试数据，Step 2 不增加复杂 transcript 对账、批量修复或兼容 UI。

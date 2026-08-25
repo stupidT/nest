@@ -13,15 +13,19 @@ export function ClaudeModelsEditor({
   rows,
   disabled = false,
   defaultModel = "",
+  savedModels,
   rowStatuses,
   onTestRow,
+  onSaveRow,
   onChange,
 }: {
   rows: string[];
   disabled?: boolean;
   defaultModel?: string;
+  savedModels?: Set<string>;
   rowStatuses?: ModelRowStatuses;
   onTestRow?: (index: number) => void;
+  onSaveRow?: (index: number) => void;
   onChange: (rows: string[]) => void;
 }) {
   const { t } = useI18n();
@@ -67,19 +71,28 @@ export function ClaudeModelsEditor({
     return status.message;
   };
 
+  const actionFor = (row: string): "test" | "save" => {
+    const trimmed = row.trim();
+    if (trimmed === "") return "test";
+    return savedModels?.has(trimmed) === false ? "save" : "test";
+  };
+
   return (
     <div className="space-y-2">
       {defaultModel.trim() !== "" && (
         <ModelRow
           label={t("settings.claude.defaultModelLabel")}
           value={defaultModel}
-          badge={t("settings.claude.defaultModelBadge")}
           disabled
           status="ok"
+          actionLabel={t("settings.claude.defaultModelAction")}
+          actionDisabled
+          removeDisabled
         />
       )}
       {rows.map((row, index) => {
         const duplicate = isDuplicateRow(rows, index);
+        const action = actionFor(row);
         return (
           <ModelRow
             key={index}
@@ -97,8 +110,19 @@ export function ClaudeModelsEditor({
             duplicate={duplicate}
             status={statusOf(row)}
             failure={failureOf(row)}
-            testing={statusOf(row) === "testing"}
-            onTest={onTestRow ? () => onTestRow(index) : undefined}
+            actionLabel={
+              action === "save"
+                ? t("settings.claude.save")
+                : t("settings.claude.testModel")
+            }
+            onAction={() => {
+              if (row.trim() === "") return;
+              if (action === "save") {
+                onSaveRow?.(index);
+              } else {
+                onTestRow?.(index);
+              }
+            }}
             onRemove={() => removeRow(index)}
             inputRef={index === rows.length - 1 ? lastRowRef : undefined}
             onChange={(value) => updateRow(index, value)}
@@ -133,13 +157,14 @@ function ModelRow({
   value,
   disabled,
   placeholder,
-  badge,
   duplicate,
   status,
   failure,
-  testing,
+  actionLabel,
+  actionDisabled,
+  removeDisabled,
   inputRef,
-  onTest,
+  onAction,
   onRemove,
   onChange,
   onKeyDown,
@@ -149,13 +174,14 @@ function ModelRow({
   value: string;
   disabled?: boolean;
   placeholder?: string;
-  badge?: string;
   duplicate?: boolean;
   status: ModelRowStatus;
   failure?: string | null;
-  testing?: boolean;
+  actionLabel: string;
+  actionDisabled?: boolean;
+  removeDisabled?: boolean;
   inputRef?: React.Ref<HTMLInputElement>;
-  onTest?: () => void;
+  onAction?: () => void;
   onRemove?: () => void;
   onChange?: (value: string) => void;
   onKeyDown?: (e: React.KeyboardEvent<HTMLInputElement>) => void;
@@ -175,57 +201,47 @@ function ModelRow({
           placeholder={placeholder}
           className="min-w-0 flex-1 font-mono text-xs"
         />
-        {status === "testing" && (
-          <LoaderCircle
-            className="size-3.5 shrink-0 animate-spin text-primary"
-            aria-label={t("settings.claude.testingModel")}
-          />
-        )}
-        {status === "ok" && (
-          <CheckCircle2
-            className="size-3.5 shrink-0 text-success"
-            aria-label={t("settings.claude.modelAvailable")}
-          />
-        )}
-        {status === "fail" && (
-          <XCircle
-            className="size-3.5 shrink-0 text-destructive"
-            aria-label={t("settings.claude.modelUnavailable")}
-          />
-        )}
-        {onTest && (
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="h-7 shrink-0 px-2 text-xs"
-            disabled={disabled || testing || value.trim() === ""}
-            onClick={onTest}
-            title={t("settings.claude.testModelTitle")}
-          >
-            {testing
-              ? t("settings.testing")
-              : t("settings.claude.testModel")}
-          </Button>
-        )}
-        {onRemove && (
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            className="shrink-0"
-            disabled={disabled}
-            onClick={onRemove}
-            aria-label={removeLabel}
-          >
-            <X className="size-3.5" />
-          </Button>
-        )}
-        {badge && (
-          <span className="shrink-0 rounded-md border bg-muted/40 px-2 py-1 font-mono text-xs text-muted-foreground">
-            {badge}
-          </span>
-        )}
+        <span className="flex w-3.5 shrink-0 items-center justify-center">
+          {status === "testing" && (
+            <LoaderCircle
+              className="size-3.5 animate-spin text-primary"
+              aria-label={t("settings.claude.testingModel")}
+            />
+          )}
+          {status === "ok" && (
+            <CheckCircle2
+              className="size-3.5 text-success"
+              aria-label={t("settings.claude.modelAvailable")}
+            />
+          )}
+          {status === "fail" && (
+            <XCircle
+              className="size-3.5 text-destructive"
+              aria-label={t("settings.claude.modelUnavailable")}
+            />
+          )}
+        </span>
+        <Button
+          type="button"
+          variant="outline"
+          className="h-7 w-16 shrink-0 px-1 text-xs"
+          disabled={disabled || actionDisabled || value.trim() === ""}
+          onClick={onAction}
+          title={t("settings.claude.testModelTitle")}
+        >
+          {status === "testing" ? t("settings.testing") : actionLabel}
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          className="shrink-0"
+          disabled={disabled || removeDisabled}
+          onClick={onRemove}
+          aria-label={removeLabel ?? label}
+        >
+          <X className="size-3.5" />
+        </Button>
       </div>
       {duplicate && (
         <p className="text-xs text-destructive">

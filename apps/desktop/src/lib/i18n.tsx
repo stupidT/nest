@@ -142,7 +142,7 @@ const messages: Record<Locale, MessageTree> = {
         detectionFailed: "No Claude CLI found on PATH or npm locations",
         detectionFailedPlaceholder: "Auto-detect Not Found",
         defaultModelLabel: "Default model",
-        defaultModelBadge: "[default]",
+        defaultModelAction: "default",
         testModel: "Test",
         testModelTitle: "Run a one-turn connectivity test with this model",
         testingModel: "Testing model",

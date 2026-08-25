@@ -33,13 +33,13 @@ pub struct ModelDescriptor {
 }
 
 pub fn descriptors(state: &SharedState) -> AppResult<Vec<BackendDescriptor>> {
-    let (settings, unknown_ids, observed_models, persisted_report) = {
+    let (settings, unknown_ids, model_statuses, persisted_report) = {
         let conn = state.db.lock();
         let settings = db::get_settings(&conn)?;
         let unknown_ids = db::list_distinct_backend_ids(&conn)?;
-        let observed_models = db::observed_claude_models(&conn, &settings.claude_cli_path)?;
+        let model_statuses = db::load_claude_model_statuses(&conn)?;
         let report = db::load_claude_connection_report(&conn);
-        (settings, unknown_ids, observed_models, report)
+        (settings, unknown_ids, model_statuses, report)
     };
     let health = crate::vault_reconciliation::load_health(state);
     let mut result = vec![nest_descriptor(
@@ -49,7 +49,7 @@ pub fn descriptors(state: &SharedState) -> AppResult<Vec<BackendDescriptor>> {
     result.push(claude_descriptor(
         state,
         &settings,
-        &observed_models,
+        &model_statuses,
         persisted_report.as_ref(),
     ));
     for id in unknown_ids {
@@ -162,7 +162,7 @@ fn nest_descriptor(chat_model: &str, reindex_required: bool) -> BackendDescripto
 fn claude_descriptor(
     state: &SharedState,
     settings: &db::AppSettings,
-    observed_models: &[String],
+    model_statuses: &std::collections::HashMap<String, db::ClaudeModelStatusEntry>,
     persisted_report: Option<&db::ClaudeConnectionReport>,
 ) -> BackendDescriptor {
     let memory = state.claude_connection.lock().clone();
@@ -204,10 +204,15 @@ fn claude_descriptor(
         source: "default".to_string(),
     }];
     models.extend(
-        db::claude_model_options(observed_models, &settings.claude_custom_models)
+        db::claude_model_options(&settings.claude_custom_models)
             .into_iter()
             .filter(|option| option.source.as_str() != "default")
             .filter(|option| default_model_id.as_deref() != Some(option.model_id.as_str()))
+            .filter(|option| {
+                !model_statuses
+                    .get(&option.model_id)
+                    .is_some_and(|entry| !entry.ok)
+            })
             .map(|option| ModelDescriptor {
                 selection: ModelSelection {
                     kind: ModelSelectionKind::Explicit,
@@ -327,15 +332,15 @@ mod tests {
             db::save_claude_settings(&conn, true, "C:\\claude\\claude.exe", "glm-5.3\nkimi")
                 .unwrap();
         }
-        let (settings, observed, persisted) = {
+        let (settings, statuses, persisted) = {
             let conn = state.db.lock();
             (
                 db::get_settings(&conn).unwrap(),
-                db::observed_claude_models(&conn, "C:\\claude\\claude.exe").unwrap(),
+                db::load_claude_model_statuses(&conn).unwrap(),
                 db::load_claude_connection_report(&conn),
             )
         };
-        let descriptor = claude_descriptor(&state, &settings, &observed, persisted.as_ref());
+        let descriptor = claude_descriptor(&state, &settings, &statuses, persisted.as_ref());
         let explicit: Vec<String> = descriptor
             .models
             .iter()
@@ -344,6 +349,62 @@ mod tests {
             .collect();
         assert_eq!(explicit, vec!["kimi".to_string()]);
         assert!(descriptor.models[0].label.starts_with("glm-5.3"));
+    }
+
+    #[test]
+    fn descriptor_offers_only_custom_models_and_excludes_failed() {
+        let state = state();
+        let report = db::ClaudeConnectionReport {
+            status: db::ClaudeConnectionStatus::Connected,
+            configured_cli_path: "C:\\claude\\claude.exe".to_string(),
+            resolved_cli_path: String::new(),
+            cli_version: String::new(),
+            effective_model: "glm-5.3".to_string(),
+            tested_at: String::new(),
+            message: None,
+        };
+        {
+            let conn = state.db.lock();
+            db::save_claude_connection_report(&conn, &report).unwrap();
+            db::save_claude_settings(&conn, true, "C:\\claude\\claude.exe", "kimi\nbroken")
+                .unwrap();
+            db::upsert_claude_model_status(
+                &conn,
+                "broken",
+                &db::ClaudeModelStatusEntry {
+                    ok: false,
+                    message: Some("no such model".to_string()),
+                    tested_at: String::new(),
+                },
+            )
+            .unwrap();
+            db::upsert_claude_model_status(
+                &conn,
+                "stale-removed",
+                &db::ClaudeModelStatusEntry {
+                    ok: true,
+                    message: None,
+                    tested_at: String::new(),
+                },
+            )
+            .unwrap();
+        }
+        let (settings, statuses, persisted) = {
+            let conn = state.db.lock();
+            (
+                db::get_settings(&conn).unwrap(),
+                db::load_claude_model_statuses(&conn).unwrap(),
+                db::load_claude_connection_report(&conn),
+            )
+        };
+        let descriptor = claude_descriptor(&state, &settings, &statuses, persisted.as_ref());
+        let explicit: Vec<String> = descriptor
+            .models
+            .iter()
+            .filter(|model| model.selection.kind == ModelSelectionKind::Explicit)
+            .map(|model| model.selection.value.clone().unwrap_or_default())
+            .collect();
+        assert_eq!(explicit, vec!["kimi".to_string()]);
     }
 
     #[test]

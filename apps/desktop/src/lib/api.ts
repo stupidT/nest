@@ -11,6 +11,7 @@ import type {
   ClaudeConnectionReport,
   ClaudeDetectionDto,
   ClaudeModelOption,
+  ClaudeModelStatusEntry,
   ClaudeModelTestResult,
   ToolActivityRow,
   WorkspaceHealth,
@@ -121,6 +122,8 @@ export const api = {
     invoke<ClaudeConnectionReport>("claude_test_connection", { cliPath }),
   claudeTestModel: (cliPath: string, model: string) =>
     invoke<ClaudeModelTestResult>("claude_test_model", { cliPath, model }),
+  claudeModelStatuses: () =>
+    invoke<Record<string, ClaudeModelStatusEntry>>("claude_model_statuses"),
   claudeSaveSettings: (request: ClaudeSettingsRequest) =>
     invoke<ClaudeConnectionReport>("claude_save_settings", { request }),
   claudeConnectionStatus: () =>

@@ -47,7 +47,6 @@ function useClaudeAgentSettings(settingsQuery: {
   const [stale, setStale] = useState(false);
   const [detection, setDetection] = useState<ClaudeDetectionDto | null>(null);
   const [detectFailed, setDetectFailed] = useState(false);
-  const [rowStatuses, setRowStatuses] = useState<ModelRowStatuses>({});
   const [testingModel, setTestingModel] = useState<string | null>(null);
 
   useEffect(() => {
@@ -65,6 +64,11 @@ function useClaudeAgentSettings(settingsQuery: {
   const connectionQuery = useQuery({
     queryKey: queryKeys.claudeConnection,
     queryFn: api.claudeConnectionStatus,
+  });
+
+  const statusesQuery = useQuery({
+    queryKey: queryKeys.claudeModelStatuses,
+    queryFn: api.claudeModelStatuses,
   });
 
   const serializedModels = serializeModelRows(modelRows);
@@ -124,27 +128,17 @@ function useClaudeAgentSettings(settingsQuery: {
     onMutate: ({ model }) => {
       setTestingModel(model.trim());
     },
-    onSuccess: (result) => {
+    onSuccess: () => {
       setTestingModel(null);
-      const key = result.model.trim();
-      if (!key) return;
-      setRowStatuses((current) => ({
-        ...current,
-        [key]: result.ok
-          ? "ok"
-          : { message: result.message ?? "model test failed" },
-      }));
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.claudeModelStatuses,
+      });
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.chatBackendDescriptors,
+      });
     },
-    onError: (e: unknown, { model }) => {
+    onError: () => {
       setTestingModel(null);
-      const key = model.trim();
-      if (!key) return;
-      setRowStatuses((current) => ({
-        ...current,
-        [key]: {
-          message: e instanceof Error ? e.message : String(e),
-        },
-      }));
     },
   });
 
@@ -156,7 +150,9 @@ function useClaudeAgentSettings(settingsQuery: {
         customModels: serializedModels,
       }),
     onSuccess: (report) => {
-      setTestResult(null);
+      setTestResult(
+        report.status === "connected" ? report : null,
+      );
       setStale(false);
       setDetectFailed(false);
       void queryClient.invalidateQueries({ queryKey: queryKeys.settings });
@@ -197,16 +193,41 @@ function useClaudeAgentSettings(settingsQuery: {
         : null;
 
   const defaultModelReport =
-    connectionQuery.data &&
+    testResult ??
+    (connectionQuery.data &&
     connectionQuery.data.configured_cli_path === draft.cliPath.trim()
       ? connectionQuery.data
-      : null;
+      : null);
   const defaultModel =
     defaultModelReport != null &&
     (defaultModelReport.status === "connected" ||
       defaultModelReport.status === "last_connected")
       ? (defaultModelReport.effective_model ?? "").trim()
       : "";
+
+  const savedModels = new Set(
+    (settingsQuery.data?.claude_custom_models ?? "")
+      .split("\n")
+      .map((model) => model.trim())
+      .filter((model) => model !== ""),
+  );
+
+  const persistedRowStatuses: ModelRowStatuses = {};
+  for (const [model, entry] of Object.entries(statusesQuery.data ?? {})) {
+    persistedRowStatuses[model] = entry.ok
+      ? "ok"
+      : { message: entry.message };
+  }
+
+  const saveRowAndTest = (index: number) => {
+    const model = modelRows[index]?.trim();
+    if (!model || save.isPending) return;
+    save.mutate(undefined, {
+      onSuccess: () => {
+        testModel.mutate({ cliPath: draft.cliPath, model });
+      },
+    });
+  };
 
   const clearDetection = () => {
     setDetection(null);
@@ -222,7 +243,9 @@ function useClaudeAgentSettings(settingsQuery: {
     test,
     testModel,
     testingModel,
-    rowStatuses,
+    persistedRowStatuses,
+    savedModels,
+    saveRowAndTest,
     save,
     dirty,
     markDirty,
@@ -250,7 +273,9 @@ export function ClaudeAgentSettingsSection({
     test,
     testModel,
     testingModel,
-    rowStatuses,
+    persistedRowStatuses,
+    savedModels,
+    saveRowAndTest,
     save,
     dirty,
     markDirty,
@@ -269,8 +294,8 @@ export function ClaudeAgentSettingsSection({
   const featureDisabled = !draft.enabled;
   const mergedRowStatuses =
     testingModel != null
-      ? { ...rowStatuses, [testingModel]: "testing" as const }
-      : rowStatuses;
+      ? { ...persistedRowStatuses, [testingModel]: "testing" as const }
+      : persistedRowStatuses;
 
   return (
     <GeneralGroup
@@ -451,12 +476,14 @@ export function ClaudeAgentSettingsSection({
           rows={modelRows}
           disabled={featureDisabled || save.isPending}
           defaultModel={defaultModel}
+          savedModels={savedModels}
           rowStatuses={mergedRowStatuses}
           onTestRow={(index) => {
             const model = modelRows[index]?.trim();
             if (!model) return;
             testModel.mutate({ cliPath: draft.cliPath, model });
           }}
+          onSaveRow={saveRowAndTest}
           onChange={(rows) => {
             setModelRows(rows);
             markDirty();
