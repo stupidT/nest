@@ -259,7 +259,7 @@ export function ChatPanel() {
   const activeOperation = operationQuery.data;
   const blockedNotice: {
     message: string;
-    reasonCode: string | null;
+    linkText: string | null;
     settingsTarget: "claude-agent" | "general" | null;
   } | null = isSending
     ? null
@@ -753,46 +753,37 @@ export function ChatPanel() {
 
       <div className="shrink-0 px-3 pb-3 pt-4">
         {composerBlocked && (
-          <div className="mb-2 flex items-center justify-between gap-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
-            <span className="flex min-w-0 items-center gap-1.5">
-              <AlertCircle className="size-3.5 shrink-0" />
-              {composerBlocked}
-              {blockedNotice?.reasonCode && (
-                <code className="shrink-0 rounded bg-muted px-1 font-mono text-[10px] text-muted-foreground/80">
-                  {blockedNotice.reasonCode}
-                </code>
-              )}
-            </span>
-            <span className="flex shrink-0 items-center gap-3">
-              {composerGate.reconnectable && (
-                <button
-                  type="button"
-                  className="flex items-center gap-1 font-medium text-primary hover:underline disabled:opacity-60"
-                  disabled={reconnectClaude.isPending}
-                  onClick={() => reconnectClaude.mutate()}
-                >
-                  {reconnectClaude.isPending && (
-                    <LoaderCircle className="size-3.5 animate-spin" />
-                  )}
-                  Reconnect
-                </button>
-              )}
-              {blockedNotice?.settingsTarget && (
-                <button
-                  type="button"
-                  className="font-medium text-primary hover:underline"
-                  onClick={() => {
-                    if (blockedNotice.settingsTarget === "claude-agent") {
-                      openClaudeSettingsTab();
-                    } else {
-                      openSettingsTab();
-                    }
-                  }}
-                >
-                  Open Settings
-                </button>
-              )}
-            </span>
+          <div className="mb-2 flex flex-wrap items-center gap-x-1.5 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+            <AlertCircle className="size-3.5 shrink-0" />
+            <span>{composerBlocked}</span>
+            {blockedNotice?.linkText && blockedNotice.settingsTarget && (
+              <button
+                type="button"
+                className="font-medium text-primary hover:underline"
+                onClick={() => {
+                  if (blockedNotice.settingsTarget === "claude-agent") {
+                    openClaudeSettingsTab();
+                  } else {
+                    openSettingsTab();
+                  }
+                }}
+              >
+                {blockedNotice.linkText}
+              </button>
+            )}
+            {composerGate.reconnectable && (
+              <button
+                type="button"
+                className="flex items-center gap-1 font-medium text-primary hover:underline disabled:opacity-60"
+                disabled={reconnectClaude.isPending}
+                onClick={() => reconnectClaude.mutate()}
+              >
+                {reconnectClaude.isPending && (
+                  <LoaderCircle className="size-3.5 animate-spin" />
+                )}
+                Reconnect
+              </button>
+            )}
           </div>
         )}
         {!composerBlocked && backendNotice && (
@@ -846,6 +837,7 @@ export function ChatPanel() {
           onBackendChange={changeBackend}
           onModelChange={changeModel}
           blocked={!!composerBlocked}
+          blockedReason={composerBlocked}
           onStop={() => {
             if (isStopping) return;
             setIsStopping(true);

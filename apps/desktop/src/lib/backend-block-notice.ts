@@ -2,7 +2,7 @@ import type { BackendDescriptor } from "@nest/shared";
 
 export type BackendBlockNotice = {
   message: string;
-  reasonCode: string | null;
+  linkText: string | null;
   settingsTarget: "claude-agent" | "general" | null;
 };
 
@@ -22,36 +22,55 @@ export function backendBlockNotice(
 
   const message = (() => {
     if (!descriptor.enabled) {
-      return `${label} is disabled. Enable it in Settings to use this chat.`;
+      return `${label} is disabled for this chat.`;
     }
     switch (reason) {
       case "cli_missing":
-        return `${label} has no CLI path configured. Set it in Settings to reconnect.`;
+        return `${label} has no CLI path configured.`;
       case "connection_unverified":
-        return `${label} is not connected yet. Run Test connection in Settings to reconnect.`;
+        return `${label} is not connected yet.`;
       case "reindex_required":
-        return `${label} is unavailable until the workspace is reindexed. Trigger a reindex from Library.`;
+        return `${label} is unavailable until the workspace is reindexed.`;
       case "unknown_backend":
         return `${label} is not installed in this build. Start a new chat with an available agent.`;
       default:
         return descriptor.message
           ? `${label}: ${descriptor.message}`
-          : `${label} is unavailable. Check Settings to reconnect.`;
+          : `${label} is unavailable.`;
+    }
+  })();
+
+  const linkText = (() => {
+    if (!descriptor.enabled) {
+      return "Enable it in Settings";
+    }
+    switch (reason) {
+      case "cli_missing":
+        return "Set the CLI path in Settings";
+      case "connection_unverified":
+        return "Run Test connection in Settings";
+      case "reindex_required":
+        return null;
+      case "unknown_backend":
+        return null;
+      default:
+        return target ? "Check Settings" : null;
     }
   })();
 
   return {
     message,
-    reasonCode: reason || null,
-    settingsTarget: target,
+    linkText,
+    settingsTarget: linkText ? target : null,
   };
 }
 
-export function backendBlockNoticeFromReason(  reason: string,
+export function backendBlockNoticeFromReason(
+  reason: string,
 ): BackendBlockNotice | null {
   return {
     message: reason,
-    reasonCode: null,
+    linkText: null,
     settingsTarget: null,
   };
 }

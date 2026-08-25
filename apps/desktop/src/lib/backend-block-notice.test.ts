@@ -22,35 +22,31 @@ function descriptor(
 }
 
 describe("backendBlockNotice", () => {
-  it("names the disabled agent and links to its settings section", () => {
+  it("names the disabled agent with an inline settings link", () => {
     const notice = backendBlockNotice(
       descriptor({ enabled: false, reason_code: "disabled" }),
     );
-    expect(notice.message).toBe(
-      "Claude is disabled. Enable it in Settings to use this chat.",
-    );
-    expect(notice.reasonCode).toBe("disabled");
+    expect(notice.message).toBe("Claude is disabled for this chat.");
+    expect(notice.linkText).toBe("Enable it in Settings");
     expect(notice.settingsTarget).toBe("claude-agent");
   });
 
-  it("explains an unverified connection and offers the settings target", () => {
+  it("explains an unverified connection with a reconnect hint", () => {
     const notice = backendBlockNotice(
       descriptor({ reason_code: "connection_unverified" }),
     );
-    expect(notice.message).toBe(
-      "Claude is not connected yet. Run Test connection in Settings to reconnect.",
-    );
+    expect(notice.message).toBe("Claude is not connected yet.");
+    expect(notice.linkText).toBe("Run Test connection in Settings");
     expect(notice.settingsTarget).toBe("claude-agent");
   });
 
   it("explains a missing CLI path", () => {
     const notice = backendBlockNotice(descriptor({ reason_code: "cli_missing" }));
-    expect(notice.message).toBe(
-      "Claude has no CLI path configured. Set it in Settings to reconnect.",
-    );
+    expect(notice.message).toBe("Claude has no CLI path configured.");
+    expect(notice.linkText).toBe("Set the CLI path in Settings");
   });
 
-  it("explains a reindex-required Nest backend", () => {
+  it("explains a reindex-required Nest backend without a settings link", () => {
     const notice = backendBlockNotice(
       descriptor({
         id: "nest",
@@ -60,9 +56,10 @@ describe("backendBlockNotice", () => {
       }),
     );
     expect(notice.message).toBe(
-      "Nest Agent is unavailable until the workspace is reindexed. Trigger a reindex from Library.",
+      "Nest Agent is unavailable until the workspace is reindexed.",
     );
-    expect(notice.settingsTarget).toBe("general");
+    expect(notice.linkText).toBeNull();
+    expect(notice.settingsTarget).toBeNull();
   });
 
   it("falls back to the descriptor message with the agent label", () => {
@@ -70,5 +67,6 @@ describe("backendBlockNotice", () => {
       descriptor({ reason_code: "other", message: "boom" }),
     );
     expect(notice.message).toBe("Claude: boom");
+    expect(notice.linkText).toBe("Check Settings");
   });
 });

@@ -1,4 +1,4 @@
-import { ArrowUp, ChevronDown, FileText, Folder, Square, X } from "lucide-react";
+import { ArrowUp, Ban, ChevronDown, FileText, Folder, Square, X } from "lucide-react";
 import type { ChatMode } from "@nest/shared";
 import {
   useEffect,
@@ -28,6 +28,7 @@ type Props = {
   isGenerating?: boolean;
   controlsDisabled?: boolean;
   blocked?: boolean;
+  blockedReason?: string | null;
   onSend: (text: string, focusPaths: string[]) => void;
   onStop?: () => void;
   canSend: boolean;
@@ -51,6 +52,7 @@ export function MentionComposer({
   isGenerating = false,
   controlsDisabled = false,
   blocked = false,
+  blockedReason = null,
   onSend,
   onStop,
   canSend,
@@ -230,7 +232,10 @@ export function MentionComposer({
     <div className="relative">
       <div
         className={cn(
-          "relative min-h-[76px] rounded-lg border border-border bg-card px-2.5 pt-2.5 pb-10 shadow-sm transition-colors focus-within:border-primary/50 focus-within:ring-1 focus-within:ring-primary/15",
+          "relative min-h-[76px] rounded-lg border bg-card px-2.5 pt-2.5 pb-10 shadow-sm transition-colors focus-within:border-primary/50 focus-within:ring-1 focus-within:ring-primary/15",
+          blocked
+            ? "border-destructive/50"
+            : "border-border",
         )}
       >
         {refs.length > 0 && (
@@ -360,6 +365,17 @@ export function MentionComposer({
             title="Stop"
           >
             <Square className="size-3 fill-current" />
+          </Button>
+        ) : blocked ? (
+          <Button
+            size="icon-sm"
+            variant="outline"
+            className="absolute right-2 bottom-2 size-6 border-destructive/50 text-destructive"
+            disabled
+            aria-label="Chat unavailable"
+            title={blockedReason ?? "Chat unavailable"}
+          >
+            <Ban className="size-3" />
           </Button>
         ) : (
           <Button
