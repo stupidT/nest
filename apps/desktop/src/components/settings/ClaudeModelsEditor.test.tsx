@@ -139,34 +139,25 @@ describe("ClaudeModelsEditor", () => {
     expect(onSaveRow).toHaveBeenCalledWith(1);
   });
 
-  it("shows testing and result states per row keyed by model id", () => {
-    const { rerender } = render(
-      <I18nProvider locale="en">
-        <ClaudeModelsEditor
-          rows={["glm-5.3", "kimi"]}
-          rowStatuses={{ "glm-5.3": "testing", kimi: "ok" }}
-          onTestRow={() => {}}
-          onChange={() => {}}
-        />
-      </I18nProvider>,
-    );
-    expect(
-      screen.getByRole("button", { name: "Testing…" }),
-    ).toBeInTheDocument();
-    rerender(
+  it("shows failure messages only as hover titles on the status icon", () => {
+    render(
       <I18nProvider locale="en">
         <ClaudeModelsEditor
           rows={["glm-5.3", "kimi"]}
           rowStatuses={{
-            "glm-5.3": { message: "boom" },
-            kimi: "ok",
+            "glm-5.3": { ok: false, message: "API Error: 400" },
+            kimi: { ok: true, message: "passed at t1" },
           }}
           onTestRow={() => {}}
           onChange={() => {}}
         />
       </I18nProvider>,
     );
-    expect(screen.getByText("boom")).toBeInTheDocument();
+    expect(screen.queryByText("API Error: 400")).not.toBeInTheDocument();
+    const failTitle = document.querySelector('[title="API Error: 400"]');
+    expect(failTitle).not.toBeNull();
+    const okTitle = document.querySelector('[title="passed at t1"]');
+    expect(okTitle).not.toBeNull();
   });
 
   it("typing in a row keeps focus and does not auto-append", () => {

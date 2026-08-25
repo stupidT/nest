@@ -148,6 +148,7 @@ const messages: Record<Locale, MessageTree> = {
         testingModel: "Testing model",
         modelAvailable: "Model available",
         modelUnavailable: "Model unavailable",
+        modelTestedAt: "Connection test passed at {{time}}",
         couldNotDetect: "Could not detect Claude CLI",
         couldNotTest: "Could not test Claude connection",
         couldNotSave: "Could not save Claude settings",

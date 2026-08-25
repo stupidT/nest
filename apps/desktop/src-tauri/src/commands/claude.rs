@@ -142,9 +142,14 @@ pub async fn claude_test_model(
         "claude_test_model",
     )?;
     let report = test_connection(&cli_path, Some(&trimmed_model), &state).await;
+    let message = report
+        .message
+        .as_deref()
+        .map(shorten_probe_failure)
+        .map(|value| value.to_string());
     let result = ClaudeModelTestResult {
         ok: report.status == ClaudeConnectionStatus::Connected,
-        message: report.message.clone(),
+        message,
         effective_model: (!report.effective_model.trim().is_empty())
             .then(|| report.effective_model.trim().to_string()),
         model: trimmed_model.clone(),
@@ -345,5 +350,49 @@ fn unavailable_report(cli_path: &str, message: &str) -> ClaudeConnectionReport {
         configured_cli_path: cli_path.to_string(),
         message: Some(message.to_string()),
         ..Default::default()
+    }
+}
+
+fn shorten_probe_failure(message: &str) -> String {
+    let cleaned = message
+        .trim_start_matches("nest tool probe failed: ")
+        .trim_start_matches("probe turn failed: ");
+    let cleaned = match cleaned.find("API Error: ") {
+        Some(at) => &cleaned[at..],
+        None => cleaned,
+    };
+    let first = cleaned.split(';').next().unwrap_or(cleaned).trim();
+    let limited: String = first.chars().take(160).collect();
+    if first.chars().count() > 160 {
+        format!("{limited}…")
+    } else {
+        limited
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shorten_probe_failure_extracts_api_error_segment() {
+        let raw = "nest tool probe failed: probe turn failed: claude_protocol_error: \
+                   success: API Error: 400 [1214][modelCode\u{ff1a}\u{4e0d}\u{5b58}\u{5e58}][20260826]; second part";
+        let shortened = shorten_probe_failure(raw);
+        assert!(shortened.starts_with("API Error: 400"));
+        assert!(!shortened.contains("nest tool probe"));
+        assert!(!shortened.contains("second part"));
+    }
+
+    #[test]
+    fn shorten_probe_failure_keeps_plain_message_and_caps_length() {
+        assert_eq!(
+            shorten_probe_failure("probe turn failed: cancelled"),
+            "cancelled"
+        );
+        let long = "x".repeat(300);
+        let shortened = shorten_probe_failure(&long);
+        assert!(shortened.chars().count() <= 161);
+        assert!(shortened.ends_with('…'));
     }
 }

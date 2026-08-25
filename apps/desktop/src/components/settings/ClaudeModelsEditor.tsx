@@ -6,8 +6,8 @@ import { useI18n } from "@/lib/i18n";
 import { isDuplicateRow } from "./model-rows";
 
 export type ModelRowStatus = "idle" | "testing" | "ok" | "fail";
-export type ModelRowFailure = { message: string | null };
-export type ModelRowStatuses = Record<string, ModelRowStatus | ModelRowFailure>;
+export type ModelRowOutcome = { ok: boolean; message: string | null };
+export type ModelRowStatuses = Record<string, ModelRowStatus | ModelRowOutcome>;
 
 export function ClaudeModelsEditor({
   rows,
@@ -62,10 +62,10 @@ export function ClaudeModelsEditor({
     const status = rowStatuses?.[row.trim()];
     if (status == null) return "idle";
     if (typeof status === "string") return status;
-    return "fail";
+    return status.ok ? "ok" : "fail";
   };
 
-  const failureOf = (row: string): string | null => {
+  const statusMessageOf = (row: string): string | null => {
     const status = rowStatuses?.[row.trim()];
     if (status == null || typeof status === "string") return null;
     return status.message;
@@ -109,7 +109,7 @@ export function ClaudeModelsEditor({
             }
             duplicate={duplicate}
             status={statusOf(row)}
-            failure={failureOf(row)}
+            statusMessage={statusMessageOf(row)}
             actionLabel={
               action === "save"
                 ? t("settings.claude.save")
@@ -159,7 +159,7 @@ function ModelRow({
   placeholder,
   duplicate,
   status,
-  failure,
+  statusMessage,
   actionLabel,
   actionDisabled,
   removeDisabled,
@@ -176,7 +176,7 @@ function ModelRow({
   placeholder?: string;
   duplicate?: boolean;
   status: ModelRowStatus;
-  failure?: string | null;
+  statusMessage?: string | null;
   actionLabel: string;
   actionDisabled?: boolean;
   removeDisabled?: boolean;
@@ -187,6 +187,14 @@ function ModelRow({
   onKeyDown?: (e: React.KeyboardEvent<HTMLInputElement>) => void;
 }) {
   const { t } = useI18n();
+  const statusTitle =
+    status === "testing"
+      ? t("settings.claude.testingModel")
+      : status === "ok"
+        ? (statusMessage ?? t("settings.claude.modelAvailable"))
+        : status === "fail"
+          ? (statusMessage ?? t("settings.claude.modelUnavailable"))
+          : undefined;
   return (
     <div className="min-w-0 space-y-1">
       <div className="grid grid-cols-[1fr_auto_auto_auto] items-center gap-2">
@@ -201,7 +209,10 @@ function ModelRow({
           placeholder={placeholder}
           className="min-w-0 font-mono text-xs"
         />
-        <span className="flex w-4 shrink-0 items-center justify-center">
+        <span
+          className="flex w-4 shrink-0 items-center justify-center"
+          title={statusTitle}
+        >
           {status === "testing" && (
             <LoaderCircle
               className="size-3.5 animate-spin text-primary"
@@ -216,7 +227,7 @@ function ModelRow({
           )}
           {status === "fail" && (
             <XCircle
-              className="size-3.5 text-destructive"
+              className="size-3.5 cursor-help text-destructive"
               aria-label={t("settings.claude.modelUnavailable")}
             />
           )}
@@ -248,11 +259,6 @@ function ModelRow({
       {duplicate && (
         <p className="text-xs text-destructive">
           {t("settings.claude.duplicateModel")}
-        </p>
-      )}
-      {status === "fail" && failure && (
-        <p className="truncate text-xs text-destructive" title={failure}>
-          {failure}
         </p>
       )}
     </div>

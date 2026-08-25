@@ -214,9 +214,14 @@ function useClaudeAgentSettings(settingsQuery: {
 
   const persistedRowStatuses: ModelRowStatuses = {};
   for (const [model, entry] of Object.entries(statusesQuery.data ?? {})) {
-    persistedRowStatuses[model] = entry.ok
-      ? "ok"
-      : { message: entry.message };
+    persistedRowStatuses[model] = {
+      ok: entry.ok,
+      message: entry.ok
+        ? t("settings.claude.modelTestedAt", {
+            time: entry.tested_at.replace("T", " ").slice(0, 19),
+          })
+        : entry.message,
+    };
   }
 
   const saveRowAndTest = (index: number) => {
