@@ -189,11 +189,20 @@ pub async fn claude_save_settings(
     }
     if !request.enabled {
         *state.claude_connection.lock() = None;
-        return Ok(ClaudeConnectionReport {
+        let mut report = ClaudeConnectionReport {
             status: ClaudeConnectionStatus::Disabled,
             configured_cli_path: request.cli_path.trim().to_string(),
             ..Default::default()
-        });
+        };
+        {
+            let conn = state.db.lock();
+            if let Some(last) = db::load_claude_connection_report(&conn)
+                .filter(|last| last.matches_configured(&request.cli_path))
+            {
+                report.effective_model = last.effective_model.clone();
+            }
+        }
+        return Ok(report);
     }
     let trimmed = request.cli_path.trim().to_string();
     let proven = {
@@ -243,37 +252,50 @@ pub async fn claude_save_settings(
 pub fn claude_connection_status(
     state: State<'_, SharedState>,
 ) -> AppResult<ClaudeConnectionReport> {
-    let settings = {
+    let (settings, persisted) = {
         let conn = state.db.lock();
-        db::get_settings(&conn)?
+        (
+            db::get_settings(&conn)?,
+            db::load_claude_connection_report(&conn),
+        )
     };
+    Ok(status_from_reports(
+        &settings,
+        persisted.as_ref(),
+        state.claude_connection.lock().as_ref(),
+    ))
+}
+
+fn status_from_reports(
+    settings: &db::AppSettings,
+    persisted: Option<&ClaudeConnectionReport>,
+    memory: Option<&ClaudeConnectionReport>,
+) -> ClaudeConnectionReport {
     if !settings.claude_agent_enabled {
-        return Ok(ClaudeConnectionReport {
+        let mut report = ClaudeConnectionReport {
             status: ClaudeConnectionStatus::Disabled,
             configured_cli_path: settings.claude_cli_path.clone(),
             ..Default::default()
-        });
+        };
+        if let Some(last) =
+            persisted.filter(|last| last.matches_configured(&settings.claude_cli_path))
+        {
+            report.effective_model = last.effective_model.clone();
+        }
+        return report;
     }
     let configured = settings.claude_cli_path.trim();
-    if let Some(report) = state.claude_connection.lock().as_ref() {
-        if report.matches_configured(configured) {
-            return Ok(report.clone());
-        }
+    if let Some(report) = memory.filter(|report| report.matches_configured(configured)) {
+        return report.clone();
     }
-    let persisted = {
-        let conn = state.db.lock();
-        db::load_claude_connection_report(&conn)
-    };
-    if let Some(mut report) = persisted {
-        if report.matches_configured(configured) {
-            report.status = ClaudeConnectionStatus::LastConnected;
-            return Ok(report);
-        }
+    if let Some(mut report) = persisted
+        .filter(|report| report.matches_configured(configured))
+        .cloned()
+    {
+        report.status = ClaudeConnectionStatus::LastConnected;
+        return report;
     }
-    Ok(unavailable_report(
-        configured,
-        "Run Test connection in Settings",
-    ))
+    unavailable_report(configured, "Run Test connection in Settings")
 }
 
 pub fn claude_connection_proven(state: &SharedState, settings: &db::AppSettings) -> bool {
@@ -394,5 +416,100 @@ mod tests {
         let shortened = shorten_probe_failure(&long);
         assert!(shortened.chars().count() <= 161);
         assert!(shortened.ends_with('…'));
+    }
+
+    fn test_state() -> SharedState {
+        std::sync::Arc::new(
+            crate::state::AppState::new(
+                std::env::temp_dir().join(format!("nest-claude-cmd-{}", uuid::Uuid::new_v4())),
+            )
+            .unwrap(),
+        )
+    }
+
+    fn settings_for(enabled: bool, cli: &str) -> db::AppSettings {
+        db::AppSettings {
+            claude_agent_enabled: enabled,
+            claude_cli_path: cli.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn connected_report(cli: &str, model: &str) -> ClaudeConnectionReport {
+        ClaudeConnectionReport {
+            status: ClaudeConnectionStatus::Connected,
+            configured_cli_path: cli.to_string(),
+            effective_model: model.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn disabled_status_keeps_last_effective_model_for_matching_path() {
+        let state = test_state();
+        {
+            let conn = state.db.lock();
+            db::save_claude_connection_report(
+                &conn,
+                &connected_report("C:\\claude.exe", "glm-5.3"),
+            )
+            .unwrap();
+        }
+        let persisted = {
+            let conn = state.db.lock();
+            db::load_claude_connection_report(&conn)
+        };
+        let report = status_from_reports(
+            &settings_for(false, "C:\\claude.exe"),
+            persisted.as_ref(),
+            None,
+        );
+        assert_eq!(report.status, ClaudeConnectionStatus::Disabled);
+        assert_eq!(report.effective_model, "glm-5.3");
+    }
+
+    #[test]
+    fn disabled_status_drops_model_from_a_different_path() {
+        let state = test_state();
+        {
+            let conn = state.db.lock();
+            db::save_claude_connection_report(
+                &conn,
+                &connected_report("C:\\claude.exe", "glm-5.3"),
+            )
+            .unwrap();
+        }
+        let persisted = {
+            let conn = state.db.lock();
+            db::load_claude_connection_report(&conn)
+        };
+        let report = status_from_reports(
+            &settings_for(false, "D:\\other.exe"),
+            persisted.as_ref(),
+            None,
+        );
+        assert_eq!(report.status, ClaudeConnectionStatus::Disabled);
+        assert_eq!(report.effective_model, "");
+    }
+
+    #[test]
+    fn enabled_status_prefers_memory_then_persisted() {
+        let memory = connected_report("C:\\claude.exe", "glm-5.3");
+        let persisted = connected_report("C:\\claude.exe", "old-model");
+        let report = status_from_reports(
+            &settings_for(true, "C:\\claude.exe"),
+            Some(&persisted),
+            Some(&memory),
+        );
+        assert_eq!(report.status, ClaudeConnectionStatus::Connected);
+        assert_eq!(report.effective_model, "glm-5.3");
+
+        let report = status_from_reports(
+            &settings_for(true, "C:\\claude.exe"),
+            Some(&persisted),
+            None,
+        );
+        assert_eq!(report.status, ClaudeConnectionStatus::LastConnected);
+        assert_eq!(report.effective_model, "old-model");
     }
 }

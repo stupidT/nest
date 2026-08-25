@@ -198,12 +198,7 @@ function useClaudeAgentSettings(settingsQuery: {
     connectionQuery.data.configured_cli_path === draft.cliPath.trim()
       ? connectionQuery.data
       : null);
-  const defaultModel =
-    defaultModelReport != null &&
-    (defaultModelReport.status === "connected" ||
-      defaultModelReport.status === "last_connected")
-      ? (defaultModelReport.effective_model ?? "").trim()
-      : "";
+  const defaultModel = (defaultModelReport?.effective_model ?? "").trim();
 
   const savedModels = new Set(
     (settingsQuery.data?.claude_custom_models ?? "")
