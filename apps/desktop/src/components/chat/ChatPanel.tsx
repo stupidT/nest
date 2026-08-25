@@ -35,6 +35,10 @@ import {
   type ChatStreamEvent,
 } from "@/lib/api";
 import { appErrorMessage } from "@/lib/errors";
+import {
+  backendBlockNotice,
+  backendBlockNoticeFromReason,
+} from "@/lib/backend-block-notice";
 import { indexInstalledPacksByLocalPath } from "@/lib/pack-index";
 import { queryKeys } from "@/lib/query-keys";
 import { cn } from "@/lib/utils";
@@ -50,6 +54,8 @@ export function ChatPanel() {
   const sessionId = useUiStore((s) => s.chatSessionId);
   const openChatTab = useUiStore((s) => s.openChatTab);
   const pruneChatTabs = useUiStore((s) => s.pruneChatTabs);
+  const openSettingsTab = useUiStore((s) => s.openSettingsTab);
+  const openClaudeSettingsTab = useUiStore((s) => s.openClaudeSettingsTab);
   const queryClient = useQueryClient();
   const setAgentRunActive = useEditorStore((s) => s.setAgentRunActive);
   const setEditing = useEditorStore((s) => s.setEditing);
@@ -251,15 +257,22 @@ export function ChatPanel() {
     (activeDescriptor.availability === "unavailable" ||
       !activeDescriptor.enabled);
   const activeOperation = operationQuery.data;
-  const composerBlocked: string | null = isSending
+  const blockedNotice: {
+    message: string;
+    reasonCode: string | null;
+    settingsTarget: "claude-agent" | "general" | null;
+  } | null = isSending
     ? null
     : activeOperation
-      ? `${activeOperation.kind.replace(/_/g, " ")} is running`
-      : descriptorBlocked
-        ? (activeDescriptor.message ??
-          activeDescriptor.reason_code ??
-          "Selected backend is unavailable")
-        : composerGate.reason;
+      ? backendBlockNoticeFromReason(
+          `${activeOperation.kind.replace(/_/g, " ")} is running`,
+        )
+      : descriptorBlocked && activeDescriptor
+        ? backendBlockNotice(activeDescriptor)
+        : composerGate.reason
+          ? backendBlockNoticeFromReason(composerGate.reason)
+          : null;
+  const composerBlocked: string | null = blockedNotice?.message ?? null;
   const backendNotice = claudeBackendNotice(
     currentSession ? { backend: currentSession.backend, backend_status: currentSession.backend_status } : null,
     claudeStatus,
@@ -744,20 +757,42 @@ export function ChatPanel() {
             <span className="flex min-w-0 items-center gap-1.5">
               <AlertCircle className="size-3.5 shrink-0" />
               {composerBlocked}
+              {blockedNotice?.reasonCode && (
+                <code className="shrink-0 rounded bg-muted px-1 font-mono text-[10px] text-muted-foreground/80">
+                  {blockedNotice.reasonCode}
+                </code>
+              )}
             </span>
-            {composerGate.reconnectable && (
-              <button
-                type="button"
-                className="flex shrink-0 items-center gap-1 font-medium text-primary hover:underline disabled:opacity-60"
-                disabled={reconnectClaude.isPending}
-                onClick={() => reconnectClaude.mutate()}
-              >
-                {reconnectClaude.isPending && (
-                  <LoaderCircle className="size-3.5 animate-spin" />
-                )}
-                Reconnect
-              </button>
-            )}
+            <span className="flex shrink-0 items-center gap-3">
+              {composerGate.reconnectable && (
+                <button
+                  type="button"
+                  className="flex items-center gap-1 font-medium text-primary hover:underline disabled:opacity-60"
+                  disabled={reconnectClaude.isPending}
+                  onClick={() => reconnectClaude.mutate()}
+                >
+                  {reconnectClaude.isPending && (
+                    <LoaderCircle className="size-3.5 animate-spin" />
+                  )}
+                  Reconnect
+                </button>
+              )}
+              {blockedNotice?.settingsTarget && (
+                <button
+                  type="button"
+                  className="font-medium text-primary hover:underline"
+                  onClick={() => {
+                    if (blockedNotice.settingsTarget === "claude-agent") {
+                      openClaudeSettingsTab();
+                    } else {
+                      openSettingsTab();
+                    }
+                  }}
+                >
+                  Open Settings
+                </button>
+              )}
+            </span>
           </div>
         )}
         {!composerBlocked && backendNotice && (
