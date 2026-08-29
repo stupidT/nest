@@ -5,7 +5,7 @@ import {
   useMessageScroller,
 } from "@shadcn/react/message-scroller";
 import { AlertCircle, Check, ChevronDown, FilePenLine, Info, Lightbulb, Loader2, LoaderCircle, X, XCircle } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   AgentStatusIndicator,
   type AgentActivity,
@@ -19,6 +19,7 @@ import { claudeBackendNotice, claudeComposerGate } from "@/lib/claude-composer";
 import {
   capsuleFromModelSelection,
   deriveCapsules,
+  isBackendUsable,
   modelSelectionFromCapsule,
 } from "@/lib/chat-selection";
 import { MarkdownBody } from "@/components/markdown/MarkdownBody";
@@ -185,41 +186,42 @@ export function ChatPanel() {
     currentSession?.selected_model ?? { kind: "default", value: null },
   );
 
-  const applySelection = (
-    patch: {
+  const applySelection = useCallback(
+    (patch: {
       backendId?: string;
       modelKind?: "default" | "explicit";
       modelValue?: string | null;
       mode?: ChatMode;
-    },
-  ) => {
-    if (!sessionId || isSending) return;
-    const revision = currentSession?.selection_revision ?? 0;
-    void api
-      .chatUpdateSelection(sessionId, revision, patch)
-      .then((updated) => {
-        queryClient.setQueryData<ChatSession[]>(
-          queryKeys.chatSessions,
-          (current) =>
-            current?.map((session) =>
-              session.id === updated.id ? updated : session,
-            ),
-        );
-      })
-      .catch((e: unknown) => {
-        const message = e instanceof Error ? e.message : String(e);
-        if (message.includes("chat_selection_stale")) {
-          void queryClient.invalidateQueries({
-            queryKey: queryKeys.chatSessions,
-          });
-          setStatusMessage(
-            "Chat selection changed elsewhere. Review and send again.",
+    }) => {
+      if (!sessionId || isSending) return;
+      const revision = currentSession?.selection_revision ?? 0;
+      void api
+        .chatUpdateSelection(sessionId, revision, patch)
+        .then((updated) => {
+          queryClient.setQueryData<ChatSession[]>(
+            queryKeys.chatSessions,
+            (current) =>
+              current?.map((session) =>
+                session.id === updated.id ? updated : session,
+              ),
           );
-          return;
-        }
-        setStatusMessage(appErrorMessage(e, "Could not update selection"));
-      });
-  };
+        })
+        .catch((e: unknown) => {
+          const message = e instanceof Error ? e.message : String(e);
+          if (message.includes("chat_selection_stale")) {
+            void queryClient.invalidateQueries({
+              queryKey: queryKeys.chatSessions,
+            });
+            setStatusMessage(
+              "Chat selection changed elsewhere. Review and send again.",
+            );
+            return;
+          }
+          setStatusMessage(appErrorMessage(e, "Could not update selection"));
+        });
+    },
+    [currentSession?.selection_revision, isSending, queryClient, sessionId, setStatusMessage],
+  );
 
   const changeMode = (nextMode: ChatMode) => {
     if (isSending || nextMode === mode) return;
@@ -279,9 +281,6 @@ export function ChatPanel() {
     claudeStatus,
   );
 
-  // An unbound session inherits the most recent backend selection, but that
-  // backend may have become disabled or disconnected since. Fall the
-  // provisional selection back to Nest so a fresh chat is always usable.
   useEffect(() => {
     if (!descriptorsQuery.data || !currentSession || currentSession.backend != null) {
       return;
@@ -289,15 +288,11 @@ export function ChatPanel() {
     const descriptor = descriptorsQuery.data.find(
       (candidate) => candidate.id === activeBackendId,
     );
-    const usable =
-      descriptor != null &&
-      descriptor.enabled &&
-      (descriptor.availability === "ready" ||
-        descriptor.availability === "last_verified");
+    const usable = descriptor != null && isBackendUsable(descriptor);
     if (!usable && activeBackendId !== "nest") {
       applySelection({ backendId: "nest", modelKind: "default", modelValue: null });
     }
-  }, [descriptorsQuery.data, currentSession, activeBackendId]);
+  }, [descriptorsQuery.data, currentSession, activeBackendId, applySelection]);
 
   const reconnectClaude = useMutation({
     mutationFn: () => {

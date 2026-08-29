@@ -1590,7 +1590,6 @@ mod resolver_tests {
 
     #[cfg(windows)]
     #[test]
-    #[cfg(windows)]
     fn shim_content_fallback_when_layout_is_unusual() {
         let fx = Fixture::new("shim-content");
         let wrapper = fx.touch("elsewhere/@anthropic-ai/claude-code/cli-wrapper.cjs");
@@ -1766,7 +1765,6 @@ mod resolver_tests {
 
     #[cfg(windows)]
     #[test]
-    #[cfg(windows)]
     fn path_env_splits_into_directories() {
         let dirs = collect_search_dirs("C:\\a\\bin;D:\\tools;;C:\\b");
         assert_eq!(dirs.len(), 3);

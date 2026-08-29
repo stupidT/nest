@@ -39,6 +39,8 @@ vi.mock("@/lib/api", () => ({
         message: null,
       }),
     claudeSaveSettings: vi.fn(),
+    claudeModelStatuses: vi.fn().mockResolvedValue({}),
+    appOperationStatus: vi.fn().mockResolvedValue(null),
     claudeConnectionStatus: vi.fn().mockResolvedValue({
       status: "connected",
       configured_cli_path: "",

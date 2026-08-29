@@ -81,9 +81,12 @@ pub fn claude_model_options(state: State<'_, SharedState>) -> AppResult<Vec<Clau
     Ok(db::claude_model_options(&settings.claude_custom_models)
         .into_iter()
         .filter(|option| {
-            !statuses
-                .get(&option.model_id)
-                .is_some_and(|entry| !entry.ok)
+            !db::model_status_for_configured_path(
+                &statuses,
+                &settings.claude_cli_path,
+                &option.model_id,
+            )
+            .is_some_and(|entry| !entry.ok)
         })
         .map(|option| ClaudeModelOptionDto {
             model_id: option.model_id,
@@ -95,9 +98,11 @@ pub fn claude_model_options(state: State<'_, SharedState>) -> AppResult<Vec<Clau
 #[tauri::command]
 pub fn claude_model_statuses(
     state: State<'_, SharedState>,
+    cli_path: String,
 ) -> AppResult<std::collections::HashMap<String, db::ClaudeModelStatusEntry>> {
     let conn = state.db.lock();
-    db::load_claude_model_statuses(&conn)
+    let statuses = db::load_claude_model_statuses(&conn)?;
+    Ok(db::model_statuses_for_configured_path(&statuses, &cli_path))
 }
 
 #[tauri::command]
@@ -160,6 +165,7 @@ pub async fn claude_test_model(
             &conn,
             &trimmed_model,
             &db::ClaudeModelStatusEntry {
+                configured_cli_path: Some(report.configured_cli_path.clone()),
                 ok: result.ok,
                 message: result.message.clone(),
                 tested_at: Utc::now().to_rfc3339(),

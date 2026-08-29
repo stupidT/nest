@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   capsuleFromModelSelection,
   deriveCapsules,
+  isBackendUsable,
   modelSelectionFromCapsule,
 } from "./chat-selection";
 
@@ -34,6 +35,19 @@ function descriptor(
     ...options,
   };
 }
+
+describe("isBackendUsable", () => {
+  it("accepts only enabled ready or last-verified backends", () => {
+    expect(isBackendUsable(descriptor("nest"))).toBe(true);
+    expect(
+      isBackendUsable(descriptor("claude", { availability: "last_verified" })),
+    ).toBe(true);
+    expect(
+      isBackendUsable(descriptor("claude", { availability: "unavailable" })),
+    ).toBe(false);
+    expect(isBackendUsable(descriptor("claude", { enabled: false }))).toBe(false);
+  });
+});
 
 describe("deriveCapsules", () => {
   it("only offers enabled descriptors unless the disabled backend is active", () => {

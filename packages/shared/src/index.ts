@@ -467,6 +467,7 @@ export type ClaudeModelTestResult = {
 };
 
 export type ClaudeModelStatusEntry = {
+  configured_cli_path: string | null;
   ok: boolean;
   message: string | null;
   tested_at: string;

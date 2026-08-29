@@ -269,6 +269,8 @@ Probe 运行在开放式 Agent runtime，但 challenge 明确要求对测试目�
 
 2026-08 修订三：observed-model 来源整体退役。Model options 只由两处构成：CLI Default（当前 Connection Report 的 `effective_model`）+ 用户 Custom models；`chat_turns` 历史与旧报告不再回流选项。每个 Custom model 有持久化测试状态（`claude_model_status_v1`：ok/message/tested_at），Settings 中行内 Test 即时更新；编辑未保存的行按钮变为 Save，保存后自动触发该模型的连通测试；测试失败的模型显示 ✗ 且不进入 composer Model options。Custom model 状态在保存设置时按列表 prune。
 
+2026-08-29 修订：Custom model 测试状态必须按 `configured CLI path + model ID` 复合隔离。Settings 只显示当前 draft path 的状态，Backend Descriptor 只消费当前已保存 path 的状态；其他 path 的成功或失败结果不得放行、隐藏或覆盖当前配置下的模型。旧版没有 CLI path 指纹的状态按 unknown 处理，等待重新测试，不得继续影响 composer。
+
 ### D26. Step 1 会话最低成本迁移
 
 保留已有 Backend Binding；旧 Claude session 的 Model Selection 初始化为 `CLI Default`，MCP credential 首次使用时延迟创建；旧 Nest session 使用当前 Settings 模型。旧会话均为开发态测试数据，Step 2 不增加复杂 transcript 对账、批量修复或兼容 UI。

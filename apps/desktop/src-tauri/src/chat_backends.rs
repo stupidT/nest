@@ -209,9 +209,12 @@ fn claude_descriptor(
             .filter(|option| option.source.as_str() != "default")
             .filter(|option| default_model_id.as_deref() != Some(option.model_id.as_str()))
             .filter(|option| {
-                !model_statuses
-                    .get(&option.model_id)
-                    .is_some_and(|entry| !entry.ok)
+                !db::model_status_for_configured_path(
+                    model_statuses,
+                    &settings.claude_cli_path,
+                    &option.model_id,
+                )
+                .is_some_and(|entry| !entry.ok)
             })
             .map(|option| ModelDescriptor {
                 selection: ModelSelection {
@@ -372,6 +375,7 @@ mod tests {
                 &conn,
                 "broken",
                 &db::ClaudeModelStatusEntry {
+                    configured_cli_path: Some("C:\\claude\\claude.exe".to_string()),
                     ok: false,
                     message: Some("no such model".to_string()),
                     tested_at: String::new(),
@@ -382,6 +386,7 @@ mod tests {
                 &conn,
                 "stale-removed",
                 &db::ClaudeModelStatusEntry {
+                    configured_cli_path: Some("C:\\claude\\claude.exe".to_string()),
                     ok: true,
                     message: None,
                     tested_at: String::new(),
@@ -405,6 +410,49 @@ mod tests {
             .map(|model| model.selection.value.clone().unwrap_or_default())
             .collect();
         assert_eq!(explicit, vec!["kimi".to_string()]);
+    }
+
+    #[test]
+    fn descriptor_ignores_model_status_from_a_different_cli_path() {
+        let state = state();
+        let report = db::ClaudeConnectionReport {
+            status: db::ClaudeConnectionStatus::Connected,
+            configured_cli_path: "C:\\claude\\saved.exe".to_string(),
+            resolved_cli_path: String::new(),
+            cli_version: String::new(),
+            effective_model: "glm-5.3".to_string(),
+            tested_at: String::new(),
+            message: None,
+        };
+        {
+            let conn = state.db.lock();
+            db::save_claude_connection_report(&conn, &report).unwrap();
+            db::save_claude_settings(&conn, true, "C:\\claude\\saved.exe", "kimi").unwrap();
+            db::upsert_claude_model_status(
+                &conn,
+                "kimi",
+                &db::ClaudeModelStatusEntry {
+                    configured_cli_path: Some("C:\\claude\\draft.exe".to_string()),
+                    ok: false,
+                    message: Some("no such model".to_string()),
+                    tested_at: String::new(),
+                },
+            )
+            .unwrap();
+        }
+        let (settings, statuses, persisted) = {
+            let conn = state.db.lock();
+            (
+                db::get_settings(&conn).unwrap(),
+                db::load_claude_model_statuses(&conn).unwrap(),
+                db::load_claude_connection_report(&conn),
+            )
+        };
+        let descriptor = claude_descriptor(&state, &settings, &statuses, persisted.as_ref());
+        assert!(descriptor.models.iter().any(|model| {
+            model.selection.kind == ModelSelectionKind::Explicit
+                && model.selection.value.as_deref() == Some("kimi")
+        }));
     }
 
     #[test]

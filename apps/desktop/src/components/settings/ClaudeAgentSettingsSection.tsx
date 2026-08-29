@@ -67,8 +67,8 @@ function useClaudeAgentSettings(settingsQuery: {
   });
 
   const statusesQuery = useQuery({
-    queryKey: queryKeys.claudeModelStatuses,
-    queryFn: api.claudeModelStatuses,
+    queryKey: [...queryKeys.claudeModelStatuses, draft.cliPath.trim()],
+    queryFn: () => api.claudeModelStatuses(draft.cliPath.trim()),
   });
 
   const serializedModels = serializeModelRows(modelRows);
@@ -184,8 +184,13 @@ function useClaudeAgentSettings(settingsQuery: {
     },
   });
 
+  const matchingTestResult =
+    testResult?.configured_cli_path === draft.cliPath.trim()
+      ? testResult
+      : null;
+
   const persistedStatus =
-    stale || testResult
+    stale || matchingTestResult
       ? null
       : connectionQuery.data &&
           connectionQuery.data.configured_cli_path === draft.cliPath.trim()
@@ -193,7 +198,7 @@ function useClaudeAgentSettings(settingsQuery: {
         : null;
 
   const defaultModelReport =
-    testResult ??
+    matchingTestResult ??
     (connectionQuery.data &&
     connectionQuery.data.configured_cli_path === draft.cliPath.trim()
       ? connectionQuery.data
@@ -209,6 +214,7 @@ function useClaudeAgentSettings(settingsQuery: {
 
   const persistedRowStatuses: ModelRowStatuses = {};
   for (const [model, entry] of Object.entries(statusesQuery.data ?? {})) {
+    if (entry.configured_cli_path !== draft.cliPath.trim()) continue;
     persistedRowStatuses[model] = {
       ok: entry.ok,
       message: entry.ok
@@ -229,9 +235,10 @@ function useClaudeAgentSettings(settingsQuery: {
     });
   };
 
-  const clearDetection = () => {
+  const clearPathFeedback = () => {
     setDetection(null);
     setDetectFailed(false);
+    setTestResult(null);
   };
 
   return {
@@ -249,12 +256,12 @@ function useClaudeAgentSettings(settingsQuery: {
     save,
     dirty,
     markDirty,
-    testResult,
+    testResult: matchingTestResult,
     persistedStatus,
     defaultModel,
     detectFailed,
     detection,
-    clearDetection,
+    clearPathFeedback,
   };
 }
 
@@ -284,7 +291,7 @@ export function ClaudeAgentSettingsSection({
     defaultModel,
     detectFailed,
     detection,
-    clearDetection,
+    clearPathFeedback,
   } = useClaudeAgentSettings(settingsQuery);
 
   const displayReport = testResult ?? persistedStatus;
@@ -292,6 +299,8 @@ export function ClaudeAgentSettingsSection({
     displayReport?.status === "connected" ||
     displayReport?.status === "last_connected";
   const featureDisabled = !draft.enabled;
+  const localOperationPending =
+    detect.isPending || test.isPending || testModel.isPending || save.isPending;
   const mergedRowStatuses =
     testingModel != null
       ? { ...persistedRowStatuses, [testingModel]: "testing" as const }
@@ -308,7 +317,7 @@ export function ClaudeAgentSettingsSection({
           size="sm"
           variant={dirty ? "default" : "outline"}
           className={cn("shrink-0", dirty && "animate-pulse")}
-          disabled={save.isPending}
+          disabled={localOperationPending}
           onClick={() => save.mutate()}
         >
           {save.isPending && (
@@ -352,6 +361,7 @@ export function ClaudeAgentSettingsSection({
             markDirty();
           }}
           aria-label={t("settings.claude.enabled")}
+          disabled={localOperationPending}
         />
       </div>
       <Field
@@ -363,7 +373,7 @@ export function ClaudeAgentSettingsSection({
             value={draft.cliPath}
             onChange={(e) => {
               setDraft((prev) => ({ ...prev, cliPath: e.target.value }));
-              clearDetection();
+              clearPathFeedback();
               markDirty();
             }}
             placeholder={
@@ -371,7 +381,7 @@ export function ClaudeAgentSettingsSection({
                 ? t("settings.claude.detectionFailedPlaceholder")
                 : "claude.exe · cli-wrapper.cjs · empty = auto-detect"
             }
-            disabled={featureDisabled || detect.isPending}
+            disabled={featureDisabled || localOperationPending}
             className={cn(
               "min-w-0 flex-1 font-mono text-xs",
               detectFailed && !draft.cliPath.trim() && "border-destructive",
@@ -381,7 +391,7 @@ export function ClaudeAgentSettingsSection({
             type="button"
             variant="outline"
             className="shrink-0"
-            disabled={featureDisabled || detect.isPending}
+            disabled={featureDisabled || localOperationPending}
             onClick={() => detect.mutate()}
           >
             {detect.isPending && (
@@ -417,7 +427,7 @@ export function ClaudeAgentSettingsSection({
             type="button"
             size="sm"
             variant="outline"
-            disabled={featureDisabled || test.isPending}
+            disabled={featureDisabled || localOperationPending}
             onClick={() => test.mutate()}
           >
             {test.isPending && (
@@ -474,7 +484,7 @@ export function ClaudeAgentSettingsSection({
       >
         <ClaudeModelsEditor
           rows={modelRows}
-          disabled={featureDisabled || save.isPending}
+          disabled={featureDisabled || localOperationPending}
           defaultModel={defaultModel}
           savedModels={savedModels}
           rowStatuses={mergedRowStatuses}
