@@ -119,17 +119,20 @@ Hub end-to-end tests use `examples/knowledge-packs` as their only registry fixtu
 
 To cut a release:
 
-1. Bump the version in all three files (they must match, the workflow fails otherwise):
+1. Bump the version in all three source files (they and the generated lockfiles must match, or the workflow fails):
    - `apps/desktop/src-tauri/tauri.conf.json`
    - `apps/desktop/package.json`
    - `apps/desktop/src-tauri/Cargo.toml`
+   - `apps/desktop/package-lock.json`
+   - `apps/desktop/src-tauri/Cargo.lock`
 2. Commit and push the version bump.
-3. Create and push tag `v{version}` (for example `git tag v1.2.3 && git push origin v1.2.3`).
-4. The workflow creates or reuses release `v{version}`, uploads installers from all runners, then publishes the release.
+3. After the release commit reaches `main`, create and push an annotated tag `v{version}` (for example `git tag -a v1.2.3 -m "Release v1.2.3" && git push origin v1.2.3`).
+4. The workflow runs the desktop frontend and Rust checks, creates or reuses draft release `v{version}`, uploads installers from all runners, then publishes the release.
 
 Notes:
 
-- The workflow fails fast if the pushed tag does not exactly match the desktop version (`v{version}`) from the three version files.
+- The workflow fails fast unless the tag points to `main` and exactly matches the desktop version (`v{version}`) in all version and lockfiles.
+- A published release is immutable to this workflow. Fixes require another version and tag; only an existing draft may be resumed.
 - The workflow can also be run manually from **Actions → Release → Run workflow** for testing.
 - Builds are unsigned: macOS users need right-click → Open (or `xattr -dr com.apple.quarantine`) on first launch; Windows shows a SmartScreen prompt.
 
